@@ -4,7 +4,6 @@ import os
 import uuid
 import math
 import mmap
-import ctypes
 import shutil
 import psutil
 import warnings
@@ -37,18 +36,6 @@ def devices_match(a: torch.device, b: torch.device) -> bool:
     if a.index is None or b.index is None:
         return True
     return a.index == b.index
-
-
-def _trim_cpu_heap() -> None:
-    """Best-effort return of freed glibc arenas to the operating system."""
-    try:
-        libc = ctypes.CDLL(None)
-        malloc_trim = libc.malloc_trim
-        malloc_trim.argtypes = [ctypes.c_size_t]
-        malloc_trim.restype = ctypes.c_int
-        malloc_trim(0)
-    except (AttributeError, OSError):
-        pass
 
 
 def _get_disk_tensor_owner(tensor: Tensor) -> Optional["DiskTensor"]:
@@ -1644,7 +1631,6 @@ class InferenceManager:
                 # chunk is what makes the disk-backed buffer an RSS bound rather
                 # than merely a file-backed copy of resident memory.
                 outputs.release_pages()
-                _trim_cpu_heap()
             for disk_input in disk_inputs:
                 # The just-consumed input range may otherwise remain resident
                 # until the whole downstream stage completes.
