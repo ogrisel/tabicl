@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Optional, Union
 from functools import partial
-import ctypes
 
 import torch
 from torch import nn, Tensor
@@ -11,18 +10,6 @@ from torch.utils.checkpoint import checkpoint
 from .rope import RotaryEmbedding
 from .layers import MultiheadAttentionBlock, InducedSelfAttentionBlock
 from .kv_cache import KVCacheEntry, KVCache
-
-
-def _trim_cpu_heap() -> None:
-    """Best-effort return of freed glibc arenas between streamed layers."""
-    try:
-        libc = ctypes.CDLL(None)
-        malloc_trim = libc.malloc_trim
-        malloc_trim.argtypes = [ctypes.c_size_t]
-        malloc_trim.restype = ctypes.c_int
-        malloc_trim(0)
-    except (AttributeError, OSError):
-        pass
 
 
 class Encoder(nn.Module):
@@ -203,10 +190,8 @@ class Encoder(nn.Module):
                     cached_kv=cached_kv,
                     rope=None,
                 )
-            previous_out = out
             out = next_out
-            del previous_out, cached_kv
-            _trim_cpu_heap()
+            del cached_kv
 
         return out
 
