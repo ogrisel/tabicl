@@ -656,6 +656,8 @@ class InferenceManager:
         self,
         min_batch_size: int = 1,
         safety_factor: float = 0.8,
+        cpu_memory_budget_mb: float = 512.0,
+        cpu_activation_factor: float = 12.0,
         offload: Union[bool, Literal["auto", "gpu", "cpu", "disk"], OffloadMode] = "auto",
         auto_offload_threshold: float = 0.5,
         device: Optional[Union[str, torch.device]] = None,
@@ -688,6 +690,18 @@ class InferenceManager:
         safety_factor : float, default=0.8
             Factor (0-1) to multiply estimated batch size by for conservative memory
             usage. Lower values are safer but may result in more batches.
+
+        cpu_memory_budget_mb : float, default=512.0
+            Target peak (in MB) for the transient activation memory of a single
+            CPU inference chunk. On CPU, inputs are split over their leading batch
+            dimensions so that each chunk stays near this budget. Lower values use
+            less memory but produce more chunks. Only used for CPU execution.
+
+        cpu_activation_factor : float, default=12.0
+            Multiplier approximating how many hidden-sized activation copies are
+            live simultaneously while processing one batch element on CPU. Used
+            together with ``cpu_memory_budget_mb`` to size CPU chunks. Only used
+            for CPU execution.
 
         offload : Union[bool, str, OffloadMode], default="auto"
             Where to store output tensors during inference:
@@ -771,6 +785,8 @@ class InferenceManager:
         """
         self.min_batch_size = int(min_batch_size)
         self.safety_factor = float(safety_factor)
+        self.cpu_memory_budget_mb = float(cpu_memory_budget_mb)
+        self.cpu_activation_factor = float(cpu_activation_factor)
         self.auto_offload_threshold = float(auto_offload_threshold)
         self.use_amp = bool(use_amp)
         self.use_fa3 = bool(use_fa3)
@@ -1122,8 +1138,10 @@ class InferenceManager:
 
         if mode == OffloadMode.CPU:
             try:
-                # Only use pinned memory for smaller allocations
-                use_pinned = output_mb <= self.max_pinned_memory_mb
+                # Only use pinned memory for smaller allocations. Pinning is only
+                # useful for device-to-host transfers and requires an accelerator,
+                # so it is disabled when executing on CPU (where it would raise).
+                use_pinned = output_mb <= self.max_pinned_memory_mb and self.exe_device.type != "cpu"
                 if self.verbose and not use_pinned:
                     print(
                         f"  Using regular (non-pinned) CPU memory for {output_mb:.0f}MB output (max_pinned={self.max_pinned_memory_mb:.0f}MB)"
@@ -1253,8 +1271,9 @@ class InferenceManager:
 
         Notes
         -----
-        - For CPU execution, batching is not supported and the forward runs once
-          via ``_run_forward`` (optional AMP + input preparation).
+        - For CPU execution, batching is driven by ``cpu_memory_budget_mb``
+          instead of accelerator memory queries; a single pass is used when the
+          inputs already fit within the budget.
         - Accelerator backends with a usable memory query (CUDA, XPU, and MPS via
           an approximate free-memory estimate) use auto-batching and OOM recovery.
         - When OOM occurs, batch size is halved and inference is retried.
@@ -1268,10 +1287,10 @@ class InferenceManager:
         if not auto_batch:
             return self._run_forward(forward_fn, self._prepare_inputs(inputs))
 
-        # CPU: no accelerator memory APIs for safe batch sizing; still route
-        # through _run_forward so AMP/no_grad wrapping stays consistent.
+        # CPU execution: memory-budgeted batching over the leading batch dims,
+        # streaming each chunk into a preallocated (optionally disk-backed) buffer.
         if self.exe_device.type == "cpu":
-            return self._run_forward(forward_fn, self._prepare_inputs(inputs))
+            return self._call_cpu(forward_fn, inputs, output_repeat=output_repeat)
 
         # Extract shape/dtype info
         first_value = next(iter(inputs.values()))
@@ -1437,6 +1456,139 @@ class InferenceManager:
                 self._empty_backend_cache()
 
                 batch_size = max(self.min_batch_size, batch_size // 2)
+
+    def _estimate_cpu_batch_size(self, seq_len: int, in_dim: int, dtype: torch.dtype) -> int:
+        """Estimate how many leading batch elements to process per CPU chunk.
+
+        Transient per-chunk activation memory scales roughly with
+        ``batch_elements x seq_len x width``, where ``width`` is the widest
+        hidden dimension involved. Keeping that product near
+        ``cpu_memory_budget_mb`` means the chunk size automatically shrinks as
+        the sequence length (e.g. the number of rows) grows, which is exactly
+        the regime where a single unsplit pass would blow up CPU memory.
+
+        Parameters
+        ----------
+        seq_len : int
+            Sequence length of the input data (the non-batch, non-feature dim).
+
+        in_dim : int
+            Input feature dimension of the first tensor.
+
+        dtype : torch.dtype
+            Data type of the activations (used for the per-element byte size).
+
+        Returns
+        -------
+        int
+            Number of leading batch elements to process together (>= 1).
+        """
+        budget_bytes = max(self.cpu_memory_budget_mb, 1.0) * 1024 * 1024
+        elem = torch.tensor([], dtype=dtype).element_size()
+        width = max(int(in_dim), int(self.out_dim), 1)
+        per_elem = max(1.0, self.cpu_activation_factor * seq_len * width * elem)
+        return max(1, int(budget_bytes // per_elem))
+
+    def _resolve_cpu_offload_mode(self, output_mb: float) -> OffloadMode:
+        """Choose CPU vs disk storage for the preallocated CPU output buffer.
+
+        The output buffer is the resident (non-transient) cost that chunking
+        cannot reduce, so moving it to a memory-mapped file is the only way to
+        keep the RAM footprint sub-linear in the number of rows/features.
+        """
+        has_disk = self.disk_offload_dir is not None
+        if self.offload_mode == OffloadMode.DISK:
+            if not has_disk:
+                raise ValueError(
+                    "Disk offload requested but disk_offload_dir is not configured. "
+                    "Please specify disk_offload_dir in the configuration."
+                )
+            return OffloadMode.DISK
+        if self.offload_mode == OffloadMode.AUTO and has_disk:
+            safe_cpu_mb = self.get_available_cpu_memory() * self.cpu_safety_factor
+            if output_mb > self.auto_offload_threshold * safe_cpu_mb:
+                return OffloadMode.DISK
+        return OffloadMode.CPU
+
+    def _call_cpu(
+        self,
+        forward_fn: Callable[..., Tensor],
+        inputs: OrderedDict[str, Any],
+        output_repeat: int = 1,
+    ) -> Tensor:
+        """Run a forward pass on CPU with memory-budgeted batching.
+
+        Splits the inputs over their leading batch dimensions so that each chunk
+        stays near ``cpu_memory_budget_mb`` of transient activation memory, and
+        streams the per-chunk results into a preallocated output buffer that can
+        optionally live on disk (memory-mapped). Because attention only mixes
+        information within the sequence dimension, splitting the batch dimensions
+        is exact: the concatenated result is identical to a single pass.
+        """
+        first_value = next(iter(inputs.values()))
+
+        # Cannot infer batch dims (e.g. non-tensor first input): single pass.
+        if not isinstance(first_value, torch.Tensor) or first_value.dim() < 3:
+            return self._run_forward(forward_fn, self._prepare_inputs(inputs))
+
+        *batch_dims, seq_len, in_dim = first_value.shape
+        input_dtype = first_value.dtype
+        total_bs = math.prod(batch_dims)
+
+        batch_size = self._estimate_cpu_batch_size(seq_len, in_dim, input_dtype)
+
+        if self.out_no_seq:
+            output_shape = (*batch_dims, self.out_dim)
+        else:
+            output_shape = (*batch_dims, seq_len, self.out_dim)
+        output_mb = self._estimate_tensor_mb(tuple(output_shape), input_dtype, repeat=output_repeat)
+        mode = self._resolve_cpu_offload_mode(output_mb)
+
+        if self.verbose:
+            print(
+                f"\n[CPU] {self.enc_name}: seq_len={seq_len}, batch_dims={tuple(batch_dims)}, "
+                f"batch_size={batch_size}, output={output_mb / 1024:.2f}GB, mode={mode.name}"
+            )
+
+        # Single-pass fast path for small inputs: preserves exact previous behavior
+        # and avoids the overhead of allocating a separate output buffer.
+        if batch_size >= total_bs and mode == OffloadMode.CPU:
+            return self._run_forward(forward_fn, self._prepare_inputs(inputs))
+
+        outputs, _ = self._allocate_output_buffer(mode, tuple(output_shape), input_dtype)
+
+        # store-cache mode: forward_fn fills a fresh KVCache per chunk that we
+        # accumulate back into the caller's pre-allocated cache.
+        store_cache_keys = {
+            name for name, v in inputs.items() if isinstance(v, KVCache) and not v.is_populated()
+        }
+
+        split_sizes = self.compute_split_sizes(batch_dims, batch_size)
+        n_batches = self.compute_n_batches(batch_dims, split_sizes)
+        batch_iterator = self.create_multidim_batches(inputs, batch_dims, split_sizes)
+        if self.verbose:
+            batch_iterator = tqdm(
+                batch_iterator, total=n_batches, desc=f"Processing {self.enc_name} (cpu)", unit="batch"
+            )
+
+        for batch_dict, indices in batch_iterator:
+            out = self._run_forward(forward_fn, batch_dict)
+
+            for cache_key in store_cache_keys:
+                batch_cache = batch_dict[cache_key]
+                if batch_cache.is_populated():
+                    original_cache = inputs[cache_key]
+                    if not original_cache.is_populated():
+                        original_cache.preallocate(batch_cache, tuple(batch_dims), device=self.exe_device)
+                    original_cache[indices] = batch_cache
+
+            outputs[indices] = out
+            del out, batch_dict
+
+        if isinstance(outputs, DiskTensor):
+            outputs.flush()
+            return outputs.tensor
+        return outputs
 
     @staticmethod
     def compute_split_sizes(batch_dims: Tuple[int], batch_size: int) -> List[int]:
