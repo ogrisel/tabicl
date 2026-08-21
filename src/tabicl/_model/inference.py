@@ -728,15 +728,18 @@ class InferenceManager:
 
         cpu_memory_budget_mb : float, default=512.0
             Target peak (in MB) for the transient activation memory of a single
-            CPU inference chunk. On CPU, inputs are split over their leading batch
-            dimensions so that each chunk stays near this budget. Lower values use
-            less memory but produce more chunks. Only used for CPU execution.
+            inference chunk. On CPU, inputs are split over their leading batch
+            dimensions so that each chunk stays near this budget. On unified-memory
+            accelerators (MPS), the same budget caps the auto-batch target used
+            by ``estimate_safe_batch_size``, so a long sequence does not try to
+            fill all remaining host RAM. Lower values use less memory but produce
+            more chunks.
 
         cpu_activation_factor : float, default=12.0
             Multiplier approximating how many hidden-sized activation copies are
             live simultaneously while processing one batch element on CPU. Used
-            together with ``cpu_memory_budget_mb`` to size CPU chunks. Only used
-            for CPU execution.
+            together with ``cpu_memory_budget_mb`` to size CPU chunks. Also used
+            to size ICL query chunks on CPU and MPS.
 
         offload : Union[bool, str, OffloadMode], default="auto"
             Where to store output tensors during inference:
@@ -747,6 +750,8 @@ class InferenceManager:
             - ``"disk"``: Offload to memory-mapped files. Supports outputs larger than RAM.
             - ``"auto"``: Automatically choose based on available memory. Uses
               ``auto_offload_threshold`` to decide when to offload from GPU.
+              On unified-memory devices (MPS), CPU is skipped as an offload
+              tier because a host copy does not free physical RAM.
 
         auto_offload_threshold : float, default=0.5
             GPU memory threshold (0-1) for automatic offloading. Only used when
@@ -854,6 +859,15 @@ class InferenceManager:
         self._buffer_pool = PinnedBufferPool()
 
         self._is_configured = True
+
+    def _uses_unified_host_memory(self) -> bool:
+        """Return whether execution memory is the same physical pool as host RAM.
+
+        Apple Silicon MPS shares RAM with the process. Treating ``tensor.cpu()``
+        as an offload, or sizing batches from ``recommended_max_memory`` (~75% of
+        the machine) while other programs hold the rest, over-counts free memory.
+        """
+        return self.exe_device.type == "mps"
 
     def _normalize_offload(self, offload: Any) -> OffloadMode:
         """Normalize various offload specifications to OffloadMode."""
@@ -965,7 +979,12 @@ class InferenceManager:
                 free_mem = recommended() - current()
             except Exception:
                 return 0.0
-            return max(0.0, free_mem) / (1024 * 1024)
+            free_mb = max(0.0, free_mem) / (1024 * 1024)
+            # Unified-memory backends share the host pool: never claim more
+            # "device" free memory than the OS still has available.
+            if self._uses_unified_host_memory():
+                free_mb = min(free_mb, self.get_available_cpu_memory())
+            return free_mb
 
         return 0.0
 
@@ -1047,6 +1066,11 @@ class InferenceManager:
         """
         available_mem = self.get_available_gpu_memory()
         target_mem = available_mem * self.safety_factor
+        if self._uses_unified_host_memory():
+            # Same policy as CPU budgeted batching: do not fill all remaining
+            # unified RAM with one activation wave. ``cpu_memory_budget_mb``
+            # already exists for that purpose.
+            target_mem = min(target_mem, self.cpu_memory_budget_mb)
 
         estimated_bs = MemoryEstimator.estimate_batch_size(seq_len, target_mem, self.enc_name, include_inputs, in_dim)
 
@@ -1067,8 +1091,13 @@ class InferenceManager:
         For user-requested modes, the requested mode is used if it fits.
         Otherwise, modes fall back: GPU -> CPU -> DISK -> CPU(swap as last resort).
 
-        For AUTO mode, the priority is:
+        AUTO mode on discrete accelerators (CUDA, XPU):
             GPU (if within threshold) -> CPU -> DISK -> CPU(swap as last resort).
+
+        AUTO mode on unified-memory devices (MPS):
+            GPU (if within threshold) -> DISK -> GPU.
+            A CPU copy does not free physical RAM, so it is not used as a
+            distinct offload tier.
 
         Note: CPU mode can use either pinned or non-pinned memory.
         - Pinned memory: faster for async GPU-CPU transfers, but locks physical memory
@@ -1140,6 +1169,18 @@ class InferenceManager:
                 "auto_gpu_fits",
                 f"{output_mb:.0f}MB <= {self.auto_offload_threshold * gpu_free_mb:.0f}MB safe gpu free",
             )
+        if self._uses_unified_host_memory():
+            # Host RAM and device RAM are the same pages. A CPU copy would
+            # raise the peak, not lower it.
+            if disk_fits:
+                return OffloadMode.DISK, OffloadReason(
+                    "auto_unified_disk",
+                    f"gpu tight -> disk ({output_mb:.0f}MB <= {safe_disk_mb:.0f}MB safe disk free)",
+                )
+            return OffloadMode.GPU, OffloadReason(
+                "auto_unified_gpu",
+                "gpu tight and no disk; staying on device (CPU offload is not a second pool)",
+            )
         elif cpu_fits:
             return OffloadMode.CPU, OffloadReason(
                 "auto_cpu_fits", f"gpu tight -> cpu ({output_mb:.0f}MB <= {safe_cpu_mb:.0f}MB safe cpu free)"
@@ -1173,10 +1214,12 @@ class InferenceManager:
 
         if mode == OffloadMode.CPU:
             try:
-                # Only use pinned memory for smaller allocations. Pinning is only
-                # useful for device-to-host transfers and requires an accelerator,
-                # so it is disabled when executing on CPU (where it would raise).
-                use_pinned = output_mb <= self.max_pinned_memory_mb and self.exe_device.type != "cpu"
+                # Pinning locks unified RAM on MPS and is useless on CPU.
+                use_pinned = (
+                    output_mb <= self.max_pinned_memory_mb
+                    and self.exe_device.type != "cpu"
+                    and not self._uses_unified_host_memory()
+                )
                 if self.verbose and not use_pinned:
                     print(
                         f"  Using regular (non-pinned) CPU memory for {output_mb:.0f}MB output (max_pinned={self.max_pinned_memory_mb:.0f}MB)"
@@ -1309,8 +1352,11 @@ class InferenceManager:
         - For CPU execution, batching is driven by ``cpu_memory_budget_mb``
           instead of accelerator memory queries; a single pass is used when the
           inputs already fit within the budget.
+        - On unified-memory accelerators (MPS), ``cpu_memory_budget_mb`` also
+          caps the auto-batch target, and AUTO offload skips CPU copies.
         - Accelerator backends with a usable memory query (CUDA, XPU, and MPS via
-          an approximate free-memory estimate) use auto-batching and OOM recovery.
+          an approximate free-memory estimate, capped by host RAM on MPS) use
+          auto-batching and OOM recovery.
         - When OOM occurs, batch size is halved and inference is retried.
         - Async copy is used when ``use_async=True`` and offloading to CPU/disk.
         """
@@ -1406,6 +1452,12 @@ class InferenceManager:
 
         # Identify store-mode caches that need to be accumulated back into the original inputs
         store_cache_keys = {name for name, v in inputs.items() if isinstance(v, KVCache) and not v.is_populated()}
+        disk_inputs = []
+        for value in inputs.values():
+            if isinstance(value, torch.Tensor):
+                owner = _get_disk_tensor_owner(value)
+                if owner is not None:
+                    disk_inputs.append(owner)
 
         # Main inference loop with OOM recovery
         while True:
@@ -1460,6 +1512,12 @@ class InferenceManager:
 
                     del out
                     del batch_dict
+                    if isinstance(outputs, DiskTensor):
+                        # Match the CPU path: drop dirty pages after each chunk
+                        # so a disk-backed buffer is an RSS bound, not a second copy.
+                        outputs.release_pages()
+                    for disk_input in disk_inputs:
+                        disk_input.release_pages()
 
                 # Drain async copies
                 if async_copy is not None:

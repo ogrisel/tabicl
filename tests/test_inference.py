@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from tabicl._model.inference import AsyncCopyManager, InferenceManager, devices_match
+from tabicl._model.inference import AsyncCopyManager, InferenceManager, OffloadMode, devices_match
 
 
 @pytest.mark.parametrize(
@@ -80,6 +80,8 @@ def test_get_available_gpu_memory_non_zero_for_available_backends(device_backend
         f"Expected non-zero available memory for backend '{device_backend}', "
         f"got {available_mb} MB"
     )
+    if device_backend == "mps":
+        assert available_mb <= mgr.get_available_cpu_memory() + 1.0
 
 
 class _FakeNoAsyncBackend:
@@ -278,5 +280,59 @@ def test_mps_memory_estimate_uses_recommended_minus_current(monkeypatch):
     fake_api.empty_cache = MagicMock()
 
     monkeypatch.setattr(mgr, "_get_device_backend_api", lambda: fake_api)
+    monkeypatch.setattr(mgr, "get_available_cpu_memory", lambda: 16 * 1024.0)
     available_mb = mgr.get_available_gpu_memory()
     assert available_mb == pytest.approx(6 * 1024.0)
+
+    monkeypatch.setattr(mgr, "get_available_cpu_memory", lambda: 1024.0)
+    available_mb = mgr.get_available_gpu_memory()
+    assert available_mb == pytest.approx(1024.0)
+
+
+def test_unified_auto_offload_skips_cpu_copy():
+    mgr = InferenceManager(enc_name="tf_col", out_dim=4)
+    mgr.configure(device="mps", offload="auto", use_amp=False, use_fa3=False)
+    mode, reason = mgr._resolve_offload_mode(
+        output_mb=400.0,
+        gpu_free_mb=500.0,
+        cpu_free_mb=8000.0,
+        disk_free_mb=0.0,
+    )
+    assert mode is OffloadMode.GPU
+    assert reason.key == "auto_unified_gpu"
+
+
+def test_unified_auto_offload_uses_disk_when_gpu_tight(tmp_path):
+    mgr = InferenceManager(enc_name="tf_col", out_dim=4)
+    mgr.configure(
+        device="mps",
+        offload="auto",
+        disk_offload_dir=str(tmp_path),
+        use_amp=False,
+        use_fa3=False,
+    )
+    mode, reason = mgr._resolve_offload_mode(
+        output_mb=400.0,
+        gpu_free_mb=500.0,
+        cpu_free_mb=8000.0,
+        disk_free_mb=10_000.0,
+    )
+    assert mode is OffloadMode.DISK
+    assert reason.key == "auto_unified_disk"
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
+def test_mps_batch_size_respects_activation_budget():
+    mgr = InferenceManager(enc_name="tf_col", out_dim=128)
+    mgr.configure(
+        device="mps",
+        cpu_memory_budget_mb=128.0,
+        use_amp=False,
+        use_fa3=False,
+    )
+    _, bs_tight = mgr.estimate_safe_batch_size(seq_len=4096, include_inputs=False, in_dim=128)
+    mgr.cpu_memory_budget_mb = 4096.0
+    _, bs_wide = mgr.estimate_safe_batch_size(seq_len=4096, include_inputs=False, in_dim=128)
+    assert bs_tight < bs_wide
+    assert bs_tight <= mgr.min_batch_size or bs_tight < 32
+

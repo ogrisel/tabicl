@@ -1,12 +1,17 @@
 from collections import OrderedDict
 
+import pytest
 import torch
 
 from tabicl._model.encoders import Encoder
 from tabicl._model.inference import InferenceManager
 
 
-def test_query_chunked_encoder_matches_full_attention():
+@pytest.mark.parametrize("device", ["cpu", "mps"])
+def test_query_chunked_encoder_matches_full_attention(device):
+    if device == "mps" and not torch.backends.mps.is_available():
+        pytest.skip("MPS backend is not available on this host")
+
     for norm_first in (True, False):
         torch.manual_seed(0)
         encoder = Encoder(
@@ -18,8 +23,8 @@ def test_query_chunked_encoder_matches_full_attention():
             norm_first=norm_first,
             ssmax="qassmax-mlp-elementwise",
             zero_init=False,
-        ).eval()
-        src = torch.randn(2, 13, 16)
+        ).eval().to(device)
+        src = torch.randn(2, 13, 16, device=device)
 
         with torch.no_grad():
             expected = encoder(src.clone(), train_size=9)
