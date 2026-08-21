@@ -23,6 +23,12 @@ class MgrConfig:
     - ``min_batch_size``: Minimum batch size to try before raising an error.
     - ``safety_factor``: Factor to multiply estimated batch size by for conservative
       memory usage.
+    - ``cpu_memory_budget_mb``: Target peak transient activation memory (MB) per CPU
+      inference chunk. Inputs are split over their leading batch dimensions to stay
+      near this budget. Only used for CPU execution.
+    - ``cpu_activation_factor``: Approximate number of live hidden-sized activation
+      copies per batch element on CPU, used with ``cpu_memory_budget_mb`` to size
+      chunks. Only used for CPU execution.
 
     **Offloading:**
 
@@ -72,6 +78,8 @@ class MgrConfig:
         # Batching
         "min_batch_size",
         "safety_factor",
+        "cpu_memory_budget_mb",
+        "cpu_activation_factor",
         # Offloading
         "offload",
         "auto_offload_threshold",
@@ -110,6 +118,16 @@ class MgrConfig:
             "expected_type": float,
             "validator": lambda x: 0.0 <= x <= 1.0,
             "error_msg": "safety_factor must be a float between 0 and 1",
+        },
+        "cpu_memory_budget_mb": {
+            "expected_type": (int, float),
+            "validator": lambda x: x > 0,
+            "error_msg": "cpu_memory_budget_mb must be a positive number",
+        },
+        "cpu_activation_factor": {
+            "expected_type": (int, float),
+            "validator": lambda x: x > 0,
+            "error_msg": "cpu_activation_factor must be a positive number",
         },
         # Offloading
         "offload": {
@@ -262,6 +280,8 @@ class InferenceConfig:
                 # Batching
                 min_batch_size=1,
                 safety_factor=0.8,
+                cpu_memory_budget_mb=512.0,
+                cpu_activation_factor=12.0,
                 # Offloading
                 offload="auto",
                 auto_offload_threshold=0.5,
@@ -295,6 +315,8 @@ class InferenceConfig:
                 # Batching
                 min_batch_size=1,
                 safety_factor=0.8,
+                cpu_memory_budget_mb=512.0,
+                cpu_activation_factor=12.0,
                 # Offloading
                 offload=False,
                 auto_offload_threshold=0.5,
@@ -328,6 +350,8 @@ class InferenceConfig:
                 # Batching
                 min_batch_size=1,
                 safety_factor=0.8,
+                cpu_memory_budget_mb=512.0,
+                cpu_activation_factor=12.0,
                 # Offloading
                 offload=False,
                 auto_offload_threshold=0.5,
