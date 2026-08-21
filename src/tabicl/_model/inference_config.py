@@ -25,13 +25,13 @@ class MgrConfig:
       memory usage.
     - ``cpu_memory_budget_mb``: Target peak transient activation memory (MB) per
       inference chunk. On CPU this sizes input splits. On unified-memory
-      accelerators (MPS) it also caps the auto-batch target so a long sequence
-      does not try to fill all remaining host RAM. CUDA/XPU still size batches
-      from device free memory.
+      accelerators (MPS, integrated XPU/CUDA iGPUs) it also caps the auto-batch
+      target so a long sequence does not try to fill all remaining host RAM.
+      Discrete GPUs still size batches from device free memory.
     - ``cpu_activation_factor``: Approximate number of live hidden-sized activation
       copies per batch element, used with ``cpu_memory_budget_mb`` to size CPU
       chunks and ICL query chunks. Used for CPU execution and for ICL query
-      chunking on MPS.
+      chunking on unified-memory accelerators.
 
     **Offloading:**
 

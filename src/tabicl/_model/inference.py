@@ -22,7 +22,7 @@ from torch import Tensor
 
 from .kv_cache import KVCache
 from .attention import flash_attn3_toggle
-from tabicl._torch_devices import resolve_torch_device
+from tabicl._torch_devices import device_uses_unified_host_memory, resolve_torch_device
 
 
 def devices_match(a: torch.device, b: torch.device) -> bool:
@@ -730,16 +730,17 @@ class InferenceManager:
             Target peak (in MB) for the transient activation memory of a single
             inference chunk. On CPU, inputs are split over their leading batch
             dimensions so that each chunk stays near this budget. On unified-memory
-            accelerators (MPS), the same budget caps the auto-batch target used
-            by ``estimate_safe_batch_size``, so a long sequence does not try to
-            fill all remaining host RAM. Lower values use less memory but produce
-            more chunks.
+            accelerators (Apple Silicon MPS, integrated XPU/CUDA iGPUs), the same
+            budget caps the auto-batch target used by ``estimate_safe_batch_size``,
+            so a long sequence does not try to fill all remaining host RAM.
+            Discrete GPUs still size batches from device free memory. Lower values
+            use less memory but produce more chunks.
 
         cpu_activation_factor : float, default=12.0
             Multiplier approximating how many hidden-sized activation copies are
             live simultaneously while processing one batch element on CPU. Used
             together with ``cpu_memory_budget_mb`` to size CPU chunks. Also used
-            to size ICL query chunks on CPU and MPS.
+            to size ICL query chunks on CPU and unified-memory accelerators.
 
         offload : Union[bool, str, OffloadMode], default="auto"
             Where to store output tensors during inference:
@@ -750,8 +751,8 @@ class InferenceManager:
             - ``"disk"``: Offload to memory-mapped files. Supports outputs larger than RAM.
             - ``"auto"``: Automatically choose based on available memory. Uses
               ``auto_offload_threshold`` to decide when to offload from GPU.
-              On unified-memory devices (MPS), CPU is skipped as an offload
-              tier because a host copy does not free physical RAM.
+              On unified-memory devices, CPU is skipped as an offload tier
+              because a host copy does not free physical RAM.
 
         auto_offload_threshold : float, default=0.5
             GPU memory threshold (0-1) for automatic offloading. Only used when
@@ -863,11 +864,13 @@ class InferenceManager:
     def _uses_unified_host_memory(self) -> bool:
         """Return whether execution memory is the same physical pool as host RAM.
 
-        Apple Silicon MPS shares RAM with the process. Treating ``tensor.cpu()``
-        as an offload, or sizing batches from ``recommended_max_memory`` (~75% of
-        the machine) while other programs hold the rest, over-counts free memory.
+        True on Apple Silicon MPS and on integrated GPUs (Intel XPU iGPU, CUDA
+        ``integrated`` devices). Treating ``tensor.cpu()`` as an offload, or
+        sizing batches from a device memory query that is really host DRAM,
+        over-counts free memory. See
+        :func:`tabicl._torch_devices.device_uses_unified_host_memory`.
         """
-        return self.exe_device.type == "mps"
+        return device_uses_unified_host_memory(self.exe_device)
 
     def _normalize_offload(self, offload: Any) -> OffloadMode:
         """Normalize various offload specifications to OffloadMode."""
@@ -942,7 +945,9 @@ class InferenceManager:
         Backends that expose ``mem_get_info`` (CUDA, XPU) use that API. On MPS,
         which does not provide ``mem_get_info``, free memory is approximated as
         ``recommended_max_memory - current_allocated_memory`` so that
-        auto-batching can still run.
+        auto-batching can still run. On unified-memory devices the result is
+        also capped by host available RAM, so a driver that reports most of
+        DRAM as "device" free memory cannot over-count against other processes.
 
         Returns
         -------
@@ -969,24 +974,24 @@ class InferenceManager:
                 free_mem, _ = mem_get_info()
             except Exception:
                 return 0.0
-            return free_mem / (1024 * 1024)
-
-        # MPS (and similar) fallback without mem_get_info.
-        recommended = getattr(backend_api, "recommended_max_memory", None)
-        current = getattr(backend_api, "current_allocated_memory", None)
-        if callable(recommended) and callable(current):
+            free_mb = free_mem / (1024 * 1024)
+        else:
+            # MPS (and similar) fallback without mem_get_info.
+            recommended = getattr(backend_api, "recommended_max_memory", None)
+            current = getattr(backend_api, "current_allocated_memory", None)
+            if not (callable(recommended) and callable(current)):
+                return 0.0
             try:
                 free_mem = recommended() - current()
             except Exception:
                 return 0.0
             free_mb = max(0.0, free_mem) / (1024 * 1024)
-            # Unified-memory backends share the host pool: never claim more
-            # "device" free memory than the OS still has available.
-            if self._uses_unified_host_memory():
-                free_mb = min(free_mb, self.get_available_cpu_memory())
-            return free_mb
 
-        return 0.0
+        # Unified-memory backends share the host pool: never claim more
+        # "device" free memory than the OS still has available.
+        if self._uses_unified_host_memory():
+            free_mb = min(max(0.0, free_mb), self.get_available_cpu_memory())
+        return max(0.0, free_mb)
 
     def get_available_disk_space(self, path: Optional[str]) -> float:
         """Get available disk space at the specified path in MB.
@@ -1091,10 +1096,10 @@ class InferenceManager:
         For user-requested modes, the requested mode is used if it fits.
         Otherwise, modes fall back: GPU -> CPU -> DISK -> CPU(swap as last resort).
 
-        AUTO mode on discrete accelerators (CUDA, XPU):
+        AUTO mode on discrete accelerators (dedicated CUDA / XPU):
             GPU (if within threshold) -> CPU -> DISK -> CPU(swap as last resort).
 
-        AUTO mode on unified-memory devices (MPS):
+        AUTO mode on unified-memory devices (MPS, integrated XPU/CUDA iGPUs):
             GPU (if within threshold) -> DISK -> GPU.
             A CPU copy does not free physical RAM, so it is not used as a
             distinct offload tier.
@@ -1214,7 +1219,7 @@ class InferenceManager:
 
         if mode == OffloadMode.CPU:
             try:
-                # Pinning locks unified RAM on MPS and is useless on CPU.
+                # Pinning locks unified RAM on iGPUs and is useless on CPU.
                 use_pinned = (
                     output_mb <= self.max_pinned_memory_mb
                     and self.exe_device.type != "cpu"
@@ -1352,11 +1357,12 @@ class InferenceManager:
         - For CPU execution, batching is driven by ``cpu_memory_budget_mb``
           instead of accelerator memory queries; a single pass is used when the
           inputs already fit within the budget.
-        - On unified-memory accelerators (MPS), ``cpu_memory_budget_mb`` also
-          caps the auto-batch target, and AUTO offload skips CPU copies.
+        - On unified-memory accelerators (MPS, integrated XPU/CUDA iGPUs),
+          ``cpu_memory_budget_mb`` also caps the auto-batch target, and AUTO
+          offload skips CPU copies.
         - Accelerator backends with a usable memory query (CUDA, XPU, and MPS via
-          an approximate free-memory estimate, capped by host RAM on MPS) use
-          auto-batching and OOM recovery.
+          an approximate free-memory estimate, capped by host RAM on unified
+          memory) use auto-batching and OOM recovery.
         - When OOM occurs, batch size is halved and inference is retried.
         - Async copy is used when ``use_async=True`` and offloading to CPU/disk.
         """

@@ -6,6 +6,8 @@ import pytest
 import torch
 
 from tabicl._model.inference import AsyncCopyManager, InferenceManager, OffloadMode, devices_match
+from tabicl._torch_devices import device_uses_unified_host_memory
+from tests.torch_devices import skip_if_device_unusable
 
 
 @pytest.mark.parametrize(
@@ -80,7 +82,7 @@ def test_get_available_gpu_memory_non_zero_for_available_backends(device_backend
         f"Expected non-zero available memory for backend '{device_backend}', "
         f"got {available_mb} MB"
     )
-    if device_backend == "mps":
+    if device_uses_unified_host_memory(device_backend):
         assert available_mb <= mgr.get_available_cpu_memory() + 1.0
 
 
@@ -289,6 +291,41 @@ def test_mps_memory_estimate_uses_recommended_minus_current(monkeypatch):
     assert available_mb == pytest.approx(1024.0)
 
 
+def test_unified_mem_get_info_capped_by_host_available(monkeypatch):
+    """XPU-style mem_get_info must still be capped on unified-memory devices."""
+    mgr = InferenceManager(enc_name="tf_col", out_dim=4)
+    mgr.configure(device="xpu", use_amp=False, use_fa3=False)
+
+    fake_api = MagicMock()
+    fake_api.is_available.return_value = True
+    fake_api.mem_get_info.return_value = (20 * 1024 * 1024 * 1024, 32 * 1024 * 1024 * 1024)
+    fake_api.synchronize = MagicMock()
+    fake_api.empty_cache = MagicMock()
+
+    monkeypatch.setattr(mgr, "_get_device_backend_api", lambda: fake_api)
+    monkeypatch.setattr(mgr, "_uses_unified_host_memory", lambda: True)
+    monkeypatch.setattr(mgr, "get_available_cpu_memory", lambda: 1024.0)
+    available_mb = mgr.get_available_gpu_memory()
+    assert available_mb == pytest.approx(1024.0)
+
+
+def test_discrete_mem_get_info_not_capped_by_host_available(monkeypatch):
+    mgr = InferenceManager(enc_name="tf_col", out_dim=4)
+    mgr.configure(device="cuda", use_amp=False, use_fa3=False)
+
+    fake_api = MagicMock()
+    fake_api.is_available.return_value = True
+    fake_api.mem_get_info.return_value = (8 * 1024 * 1024 * 1024, 24 * 1024 * 1024 * 1024)
+    fake_api.synchronize = MagicMock()
+    fake_api.empty_cache = MagicMock()
+
+    monkeypatch.setattr(mgr, "_get_device_backend_api", lambda: fake_api)
+    monkeypatch.setattr(mgr, "_uses_unified_host_memory", lambda: False)
+    monkeypatch.setattr(mgr, "get_available_cpu_memory", lambda: 1024.0)
+    available_mb = mgr.get_available_gpu_memory()
+    assert available_mb == pytest.approx(8 * 1024.0)
+
+
 def test_unified_auto_offload_skips_cpu_copy():
     mgr = InferenceManager(enc_name="tf_col", out_dim=4)
     mgr.configure(device="mps", offload="auto", use_amp=False, use_fa3=False)
@@ -321,11 +358,49 @@ def test_unified_auto_offload_uses_disk_when_gpu_tight(tmp_path):
     assert reason.key == "auto_unified_disk"
 
 
-@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
-def test_mps_batch_size_respects_activation_budget():
+def test_discrete_auto_offload_uses_cpu_copy(monkeypatch):
+    monkeypatch.setattr(
+        "tabicl._model.inference.device_uses_unified_host_memory",
+        lambda device: False,
+    )
+    mgr = InferenceManager(enc_name="tf_col", out_dim=4)
+    mgr.configure(device="cuda", offload="auto", use_amp=False, use_fa3=False)
+    mode, reason = mgr._resolve_offload_mode(
+        output_mb=400.0,
+        gpu_free_mb=500.0,
+        cpu_free_mb=8000.0,
+        disk_free_mb=0.0,
+    )
+    assert mode is OffloadMode.CPU
+    assert reason.key == "auto_cpu_fits"
+
+
+def test_detected_igpu_auto_offload_skips_cpu_copy(monkeypatch):
+    monkeypatch.setattr(
+        "tabicl._model.inference.device_uses_unified_host_memory",
+        lambda device: True,
+    )
+    mgr = InferenceManager(enc_name="tf_col", out_dim=4)
+    mgr.configure(device="xpu", offload="auto", use_amp=False, use_fa3=False)
+    mode, reason = mgr._resolve_offload_mode(
+        output_mb=400.0,
+        gpu_free_mb=500.0,
+        cpu_free_mb=8000.0,
+        disk_free_mb=0.0,
+    )
+    assert mode is OffloadMode.GPU
+    assert reason.key == "auto_unified_gpu"
+
+
+@pytest.mark.parametrize("device_backend", ["mps", "xpu", "cuda"])
+def test_unified_batch_size_respects_activation_budget(device_backend):
+    skip_if_device_unusable(device_backend)
+    if not device_uses_unified_host_memory(device_backend):
+        pytest.skip(f"{device_backend} is a discrete accelerator on this host")
+
     mgr = InferenceManager(enc_name="tf_col", out_dim=128)
     mgr.configure(
-        device="mps",
+        device=device_backend,
         cpu_memory_budget_mb=128.0,
         use_amp=False,
         use_fa3=False,
