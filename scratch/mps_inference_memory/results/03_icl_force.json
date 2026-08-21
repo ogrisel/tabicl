@@ -1,0 +1,494 @@
+[
+  {
+    "ok": true,
+    "tag": "baseline_n2048_b8",
+    "device": "mps",
+    "n_train": 2048,
+    "n_test": 64,
+    "n_features": 30,
+    "n_estimators": 1,
+    "use_amp": true,
+    "offload_mode": false,
+    "cpu_memory_budget_mb": 8.0,
+    "patches": [],
+    "fit_s": 0.21232995798345655,
+    "predict_s": 1.0446469580056146,
+    "rss0_mb": 333.859375,
+    "rss_after_fit_mb": 569.015625,
+    "rss_after_predict_mb": 659.734375,
+    "pred_mean": 13.012639045715332,
+    "pred_std": 4.9210896492004395,
+    "pred_path": "/Users/ogrisel/code/tabicl/scratch/mps_inference_memory/results/pred_baseline_n2048_b8.npy",
+    "peak_rss_mb": 659.734375,
+    "peak_rss_delta_mb": 325.875,
+    "peak_mps_alloc_mb": 405.3515625,
+    "peak_mps_driver_mb": 2513.9375,
+    "maxrss_mb": 659.734375,
+    "host": {
+      "ram": {
+        "total_gb": 32.0,
+        "available_gb": 11.194793701171875,
+        "used_gb": 12.01141357421875
+      },
+      "disk": {
+        "total_gb": 460.4317207336426,
+        "free_gb": 33.40422058105469,
+        "used_gb": 427.0275001525879
+      }
+    },
+    "elapsed_s": 3.054538541007787,
+    "cfg": {
+      "n_train": 2048,
+      "n_features": 30,
+      "n_test": 64,
+      "n_estimators": 1,
+      "device": "mps",
+      "use_amp": true,
+      "offload_mode": false,
+      "patches": [],
+      "tag": "baseline_n2048_b8",
+      "max_rss_delta_gb": 6.0,
+      "cpu_memory_budget_mb": 8.0,
+      "max_mmap_gb": 2.0
+    },
+    "probe": "baseline",
+    "max_abs_diff_vs_baseline": 0.0
+  },
+  {
+    "ok": true,
+    "tag": "H2_unified_cap_n2048_b8",
+    "device": "mps",
+    "n_train": 2048,
+    "n_test": 64,
+    "n_features": 30,
+    "n_estimators": 1,
+    "use_amp": true,
+    "offload_mode": false,
+    "cpu_memory_budget_mb": 8.0,
+    "patches": [
+      "unified_mem_cap"
+    ],
+    "fit_s": 0.2200044160708785,
+    "predict_s": 0.978225625003688,
+    "rss0_mb": 333.46875,
+    "rss_after_fit_mb": 567.59375,
+    "rss_after_predict_mb": 658.625,
+    "pred_mean": 13.012639045715332,
+    "pred_std": 4.9210896492004395,
+    "pred_path": "/Users/ogrisel/code/tabicl/scratch/mps_inference_memory/results/pred_H2_unified_cap_n2048_b8.npy",
+    "peak_rss_mb": 658.59375,
+    "peak_rss_delta_mb": 325.125,
+    "peak_mps_alloc_mb": 234.713134765625,
+    "peak_mps_driver_mb": 2513.9375,
+    "maxrss_mb": 658.625,
+    "host": {
+      "ram": {
+        "total_gb": 32.0,
+        "available_gb": 10.198410034179688,
+        "used_gb": 12.926666259765625
+      },
+      "disk": {
+        "total_gb": 460.4317207336426,
+        "free_gb": 33.404048919677734,
+        "used_gb": 427.02767181396484
+      }
+    },
+    "elapsed_s": 3.041837624972686,
+    "cfg": {
+      "n_train": 2048,
+      "n_features": 30,
+      "n_test": 64,
+      "n_estimators": 1,
+      "device": "mps",
+      "use_amp": true,
+      "offload_mode": false,
+      "patches": [
+        "unified_mem_cap"
+      ],
+      "tag": "H2_unified_cap_n2048_b8",
+      "max_rss_delta_gb": 6.0,
+      "cpu_memory_budget_mb": 8.0,
+      "max_mmap_gb": 2.0
+    },
+    "probe": "H2_unified_cap",
+    "max_abs_diff_vs_baseline": 0.0
+  },
+  {
+    "ok": true,
+    "tag": "H4_query_chunks_n2048_b8",
+    "device": "mps",
+    "n_train": 2048,
+    "n_test": 64,
+    "n_features": 30,
+    "n_estimators": 1,
+    "use_amp": true,
+    "offload_mode": false,
+    "cpu_memory_budget_mb": 8.0,
+    "patches": [
+      "query_chunks_mps"
+    ],
+    "fit_s": 0.2189043750986457,
+    "predict_s": 1.3599280000198632,
+    "rss0_mb": 333.125,
+    "rss_after_fit_mb": 563.59375,
+    "rss_after_predict_mb": 658.453125,
+    "pred_mean": 13.012639045715332,
+    "pred_std": 4.9210896492004395,
+    "pred_path": "/Users/ogrisel/code/tabicl/scratch/mps_inference_memory/results/pred_H4_query_chunks_n2048_b8.npy",
+    "peak_rss_mb": 658.421875,
+    "peak_rss_delta_mb": 325.296875,
+    "peak_mps_alloc_mb": 405.3515625,
+    "peak_mps_driver_mb": 2581.953125,
+    "maxrss_mb": 658.453125,
+    "icl_seq": 2112,
+    "icl_chunk": 341,
+    "icl_dtype": "torch.float32",
+    "icl_width": 512,
+    "icl_budget_mb": 8.0,
+    "icl_would_chunk": true,
+    "host": {
+      "ram": {
+        "total_gb": 32.0,
+        "available_gb": 10.293563842773438,
+        "used_gb": 12.902862548828125
+      },
+      "disk": {
+        "total_gb": 460.4317207336426,
+        "free_gb": 33.4035758972168,
+        "used_gb": 427.0281448364258
+      }
+    },
+    "elapsed_s": 3.4947779590729624,
+    "cfg": {
+      "n_train": 2048,
+      "n_features": 30,
+      "n_test": 64,
+      "n_estimators": 1,
+      "device": "mps",
+      "use_amp": true,
+      "offload_mode": false,
+      "patches": [
+        "query_chunks_mps"
+      ],
+      "tag": "H4_query_chunks_n2048_b8",
+      "max_rss_delta_gb": 6.0,
+      "cpu_memory_budget_mb": 8.0,
+      "max_mmap_gb": 2.0
+    },
+    "probe": "H4_query_chunks",
+    "max_abs_diff_vs_baseline": 0.0
+  },
+  {
+    "ok": true,
+    "tag": "combo_n2048_b8",
+    "device": "mps",
+    "n_train": 2048,
+    "n_test": 64,
+    "n_features": 30,
+    "n_estimators": 1,
+    "use_amp": true,
+    "offload_mode": false,
+    "cpu_memory_budget_mb": 8.0,
+    "patches": [
+      "unified_mem_cap",
+      "query_chunks_mps"
+    ],
+    "fit_s": 0.2171147910412401,
+    "predict_s": 1.0568614579970017,
+    "rss0_mb": 333.46875,
+    "rss_after_fit_mb": 567.375,
+    "rss_after_predict_mb": 663.140625,
+    "pred_mean": 13.012639045715332,
+    "pred_std": 4.9210896492004395,
+    "pred_path": "/Users/ogrisel/code/tabicl/scratch/mps_inference_memory/results/pred_combo_n2048_b8.npy",
+    "peak_rss_mb": 663.109375,
+    "peak_rss_delta_mb": 329.640625,
+    "peak_mps_alloc_mb": 287.934326171875,
+    "peak_mps_driver_mb": 2581.953125,
+    "maxrss_mb": 663.140625,
+    "icl_seq": 2112,
+    "icl_chunk": 341,
+    "icl_dtype": "torch.float32",
+    "icl_width": 512,
+    "icl_budget_mb": 8.0,
+    "icl_would_chunk": true,
+    "host": {
+      "ram": {
+        "total_gb": 32.0,
+        "available_gb": 11.311080932617188,
+        "used_gb": 11.332260131835938
+      },
+      "disk": {
+        "total_gb": 460.4317207336426,
+        "free_gb": 33.402976989746094,
+        "used_gb": 427.0287437438965
+      }
+    },
+    "elapsed_s": 3.0832728749373928,
+    "cfg": {
+      "n_train": 2048,
+      "n_features": 30,
+      "n_test": 64,
+      "n_estimators": 1,
+      "device": "mps",
+      "use_amp": true,
+      "offload_mode": false,
+      "patches": [
+        "unified_mem_cap",
+        "query_chunks_mps"
+      ],
+      "tag": "combo_n2048_b8",
+      "max_rss_delta_gb": 6.0,
+      "cpu_memory_budget_mb": 8.0,
+      "max_mmap_gb": 2.0
+    },
+    "probe": "combo",
+    "max_abs_diff_vs_baseline": 0.0
+  },
+  {
+    "ok": true,
+    "tag": "baseline_n4096_b8",
+    "device": "mps",
+    "n_train": 4096,
+    "n_test": 64,
+    "n_features": 30,
+    "n_estimators": 1,
+    "use_amp": true,
+    "offload_mode": false,
+    "cpu_memory_budget_mb": 8.0,
+    "patches": [],
+    "fit_s": 0.21878670807927847,
+    "predict_s": 2.3577692499384284,
+    "rss0_mb": 333.65625,
+    "rss_after_fit_mb": 565.421875,
+    "rss_after_predict_mb": 627.578125,
+    "pred_mean": 14.503780364990234,
+    "pred_std": 4.2879815101623535,
+    "pred_path": "/Users/ogrisel/code/tabicl/scratch/mps_inference_memory/results/pred_baseline_n4096_b8.npy",
+    "peak_rss_mb": 640.453125,
+    "peak_rss_delta_mb": 306.796875,
+    "peak_mps_alloc_mb": 426.23583984375,
+    "peak_mps_driver_mb": 4468.890625,
+    "maxrss_mb": 640.703125,
+    "host": {
+      "ram": {
+        "total_gb": 32.0,
+        "available_gb": 10.210052490234375,
+        "used_gb": 12.429000854492188
+      },
+      "disk": {
+        "total_gb": 460.4317207336426,
+        "free_gb": 33.4044075012207,
+        "used_gb": 427.0273132324219
+      }
+    },
+    "elapsed_s": 4.388730666949414,
+    "cfg": {
+      "n_train": 4096,
+      "n_features": 30,
+      "n_test": 64,
+      "n_estimators": 1,
+      "device": "mps",
+      "use_amp": true,
+      "offload_mode": false,
+      "patches": [],
+      "tag": "baseline_n4096_b8",
+      "max_rss_delta_gb": 8.0,
+      "cpu_memory_budget_mb": 8.0,
+      "max_mmap_gb": 2.0
+    },
+    "probe": "baseline",
+    "max_abs_diff_vs_baseline": 0.0
+  },
+  {
+    "ok": true,
+    "tag": "H2_unified_cap_n4096_b8",
+    "device": "mps",
+    "n_train": 4096,
+    "n_test": 64,
+    "n_features": 30,
+    "n_estimators": 1,
+    "use_amp": true,
+    "offload_mode": false,
+    "cpu_memory_budget_mb": 8.0,
+    "patches": [
+      "unified_mem_cap"
+    ],
+    "fit_s": 0.22591650008689612,
+    "predict_s": 2.216706332983449,
+    "rss0_mb": 333.40625,
+    "rss_after_fit_mb": 569.484375,
+    "rss_after_predict_mb": 661.5625,
+    "pred_mean": 14.503780364990234,
+    "pred_std": 4.2879815101623535,
+    "pred_path": "/Users/ogrisel/code/tabicl/scratch/mps_inference_memory/results/pred_H2_unified_cap_n4096_b8.npy",
+    "peak_rss_mb": 661.53125,
+    "peak_rss_delta_mb": 328.125,
+    "peak_mps_alloc_mb": 420.6083984375,
+    "peak_mps_driver_mb": 4468.890625,
+    "maxrss_mb": 661.5625,
+    "host": {
+      "ram": {
+        "total_gb": 32.0,
+        "available_gb": 10.545623779296875,
+        "used_gb": 11.50225830078125
+      },
+      "disk": {
+        "total_gb": 460.4317207336426,
+        "free_gb": 33.40353012084961,
+        "used_gb": 427.02819061279297
+      }
+    },
+    "elapsed_s": 4.310720667010173,
+    "cfg": {
+      "n_train": 4096,
+      "n_features": 30,
+      "n_test": 64,
+      "n_estimators": 1,
+      "device": "mps",
+      "use_amp": true,
+      "offload_mode": false,
+      "patches": [
+        "unified_mem_cap"
+      ],
+      "tag": "H2_unified_cap_n4096_b8",
+      "max_rss_delta_gb": 8.0,
+      "cpu_memory_budget_mb": 8.0,
+      "max_mmap_gb": 2.0
+    },
+    "probe": "H2_unified_cap",
+    "max_abs_diff_vs_baseline": 0.0
+  },
+  {
+    "ok": true,
+    "tag": "H4_query_chunks_n4096_b8",
+    "device": "mps",
+    "n_train": 4096,
+    "n_test": 64,
+    "n_features": 30,
+    "n_estimators": 1,
+    "use_amp": true,
+    "offload_mode": false,
+    "cpu_memory_budget_mb": 8.0,
+    "patches": [
+      "query_chunks_mps"
+    ],
+    "fit_s": 0.22162191604729742,
+    "predict_s": 2.415058666956611,
+    "rss0_mb": 333.671875,
+    "rss_after_fit_mb": 565.40625,
+    "rss_after_predict_mb": 661.703125,
+    "pred_mean": 14.503780364990234,
+    "pred_std": 4.2879815101623535,
+    "pred_path": "/Users/ogrisel/code/tabicl/scratch/mps_inference_memory/results/pred_H4_query_chunks_n4096_b8.npy",
+    "peak_rss_mb": 661.671875,
+    "peak_rss_delta_mb": 328.0,
+    "peak_mps_alloc_mb": 455.704345703125,
+    "peak_mps_driver_mb": 4468.890625,
+    "maxrss_mb": 661.703125,
+    "icl_seq": 4160,
+    "icl_chunk": 341,
+    "icl_dtype": "torch.float32",
+    "icl_width": 512,
+    "icl_budget_mb": 8.0,
+    "icl_would_chunk": true,
+    "host": {
+      "ram": {
+        "total_gb": 32.0,
+        "available_gb": 10.458328247070312,
+        "used_gb": 11.570663452148438
+      },
+      "disk": {
+        "total_gb": 460.4317207336426,
+        "free_gb": 33.40341567993164,
+        "used_gb": 427.02830505371094
+      }
+    },
+    "elapsed_s": 4.642002624925226,
+    "cfg": {
+      "n_train": 4096,
+      "n_features": 30,
+      "n_test": 64,
+      "n_estimators": 1,
+      "device": "mps",
+      "use_amp": true,
+      "offload_mode": false,
+      "patches": [
+        "query_chunks_mps"
+      ],
+      "tag": "H4_query_chunks_n4096_b8",
+      "max_rss_delta_gb": 8.0,
+      "cpu_memory_budget_mb": 8.0,
+      "max_mmap_gb": 2.0
+    },
+    "probe": "H4_query_chunks",
+    "max_abs_diff_vs_baseline": 0.0
+  },
+  {
+    "ok": true,
+    "tag": "combo_n4096_b8",
+    "device": "mps",
+    "n_train": 4096,
+    "n_test": 64,
+    "n_features": 30,
+    "n_estimators": 1,
+    "use_amp": true,
+    "offload_mode": false,
+    "cpu_memory_budget_mb": 8.0,
+    "patches": [
+      "unified_mem_cap",
+      "query_chunks_mps"
+    ],
+    "fit_s": 0.2247002909425646,
+    "predict_s": 2.4152494999580085,
+    "rss0_mb": 333.71875,
+    "rss_after_fit_mb": 567.875,
+    "rss_after_predict_mb": 664.203125,
+    "pred_mean": 14.503780364990234,
+    "pred_std": 4.2879815101623535,
+    "pred_path": "/Users/ogrisel/code/tabicl/scratch/mps_inference_memory/results/pred_combo_n4096_b8.npy",
+    "peak_rss_mb": 664.171875,
+    "peak_rss_delta_mb": 330.453125,
+    "peak_mps_alloc_mb": 429.16162109375,
+    "peak_mps_driver_mb": 4468.890625,
+    "maxrss_mb": 664.203125,
+    "icl_seq": 4160,
+    "icl_chunk": 341,
+    "icl_dtype": "torch.float32",
+    "icl_width": 512,
+    "icl_budget_mb": 8.0,
+    "icl_would_chunk": true,
+    "host": {
+      "ram": {
+        "total_gb": 32.0,
+        "available_gb": 10.869964599609375,
+        "used_gb": 11.134262084960938
+      },
+      "disk": {
+        "total_gb": 460.4317207336426,
+        "free_gb": 33.404537200927734,
+        "used_gb": 427.02718353271484
+      }
+    },
+    "elapsed_s": 4.5551173749845475,
+    "cfg": {
+      "n_train": 4096,
+      "n_features": 30,
+      "n_test": 64,
+      "n_estimators": 1,
+      "device": "mps",
+      "use_amp": true,
+      "offload_mode": false,
+      "patches": [
+        "unified_mem_cap",
+        "query_chunks_mps"
+      ],
+      "tag": "combo_n4096_b8",
+      "max_rss_delta_gb": 8.0,
+      "cpu_memory_budget_mb": 8.0,
+      "max_mmap_gb": 2.0
+    },
+    "probe": "combo",
+    "max_abs_diff_vs_baseline": 0.0
+  }
+]

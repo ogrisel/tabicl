@@ -26,6 +26,8 @@ Bug fixes
 
 - Improve Apple Silicon MPS inference: MPS now uses the same AMP, auto-batching, and memory-aware inference path as other accelerators instead of falling back to the CPU path. `use_amp="auto"` is device-aware (off on CPU; size heuristic on CUDA/XPU/MPS), and float16 KV caches are kept on MPS when AMP is enabled. MPS is included in the default device order (CUDA → XPU → MPS → CPU). ([PR#144](https://github.com/soda-inria/tabicl/pull/144))
 
+- Bound unified-memory inference (Apple Silicon MPS and integrated GPUs such as Intel XPU iGPUs): free-memory estimates are capped by host available RAM, auto-batching also respects ``cpu_memory_budget_mb``, AUTO offload no longer treats a CPU copy as a second pool, host buffers are not pinned, ICL query-chunking is no longer CPU-only, and disk-backed stages release pages after each accelerator batch. Integrated vs discrete GPUs are detected from backend device properties (``is_integrated_gpu`` / ``integrated``), with MPS always treated as unified.
+
 
 2.1.0
 =====

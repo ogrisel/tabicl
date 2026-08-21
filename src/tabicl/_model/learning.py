@@ -269,11 +269,7 @@ class ICLearning(nn.Module):
             Ry_train = self.y_encoder(y_train.unsqueeze(-1))
         R[:, :train_size] = R[:, :train_size] + Ry_train
 
-        use_query_chunks = (
-            not self.training
-            and self.inference_mgr._is_configured
-            and self.inference_mgr.exe_device.type == "cpu"
-        )
+        use_query_chunks = not self.training and self.inference_mgr._is_configured
         if use_query_chunks:
             batch_size = math.prod(R.shape[:-2])
             elem_size = R.element_size()
