@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 import math
+import mmap
 import shutil
 import psutil
 import warnings
@@ -35,6 +36,17 @@ def devices_match(a: torch.device, b: torch.device) -> bool:
     if a.index is None or b.index is None:
         return True
     return a.index == b.index
+
+
+def _get_disk_tensor_owner(tensor: Tensor) -> Optional["DiskTensor"]:
+    """Find a disk owner through a chain of tensor views."""
+    current = tensor
+    while isinstance(current, torch.Tensor):
+        owner = getattr(current, "_tabicl_disk_tensor", None)
+        if owner is not None:
+            return owner
+        current = getattr(current, "_base", None)
+    return None
 
 
 class MemoryEstimator:
@@ -376,6 +388,11 @@ class DiskTensor:
     @property
     def tensor(self) -> Tensor:
         """Get the torch tensor view of this disk tensor."""
+        # Keep the mmap owner reachable from downstream stages. Tensor slices
+        # do not retain arbitrary Python attributes, so ``InferenceManager``
+        # consults this attribute on the original input and can evict pages
+        # after consuming each chunk.
+        self._tensor._tabicl_disk_tensor = self
         return self._tensor
 
     def __getitem__(self, indices) -> Tensor:
@@ -391,6 +408,24 @@ class DiskTensor:
     def flush(self) -> None:
         """Flush changes to disk."""
         self._memmap.flush()
+
+    def release_pages(self) -> None:
+        """Flush and evict resident pages while keeping the mapping usable.
+
+        A memory map only reduces RSS when the operating system is allowed to
+        reclaim its pages.  After a stage writes the complete output, Linux
+        otherwise tends to keep all dirty pages resident, making disk offload
+        look like ordinary RAM. ``MADV_DONTNEED`` drops those clean pages; a
+        downstream chunk faults back only the range it actually consumes.
+
+        On platforms without ``madvise`` support, flushing still preserves the
+        previous behavior and correctness.
+        """
+        self.flush()
+        try:
+            self._memmap._mmap.madvise(mmap.MADV_DONTNEED)
+        except (AttributeError, OSError, ValueError):
+            pass
 
     @property
     def nbytes(self) -> int:
@@ -1349,7 +1384,7 @@ class InferenceManager:
             outputs, _ = self._allocate_output_buffer(mode, tuple(out.shape), input_dtype)
             if isinstance(outputs, DiskTensor):
                 outputs[...] = out.cpu()
-                outputs.flush()
+                outputs.release_pages()
                 return outputs.tensor
             outputs.copy_(out.cpu())
             return outputs
@@ -1432,7 +1467,7 @@ class InferenceManager:
 
                 # Final flush
                 if isinstance(outputs, DiskTensor):
-                    outputs.flush()
+                    outputs.release_pages()
                     return outputs.tensor
 
                 return outputs
@@ -1556,6 +1591,12 @@ class InferenceManager:
             return self._run_forward(forward_fn, self._prepare_inputs(inputs))
 
         outputs, _ = self._allocate_output_buffer(mode, tuple(output_shape), input_dtype)
+        disk_inputs = []
+        for value in inputs.values():
+            if isinstance(value, torch.Tensor):
+                owner = _get_disk_tensor_owner(value)
+                if owner is not None:
+                    disk_inputs.append(owner)
 
         # store-cache mode: forward_fn fills a fresh KVCache per chunk that we
         # accumulate back into the caller's pre-allocated cache.
@@ -1584,9 +1625,19 @@ class InferenceManager:
 
             outputs[indices] = out
             del out, batch_dict
+            if isinstance(outputs, DiskTensor):
+                # Do not let dirty pages from completed chunks accumulate until
+                # the full output has been produced.  Releasing after each
+                # chunk is what makes the disk-backed buffer an RSS bound rather
+                # than merely a file-backed copy of resident memory.
+                outputs.release_pages()
+            for disk_input in disk_inputs:
+                # The just-consumed input range may otherwise remain resident
+                # until the whole downstream stage completes.
+                disk_input.release_pages()
 
         if isinstance(outputs, DiskTensor):
-            outputs.flush()
+            outputs.release_pages()
             return outputs.tensor
         return outputs
 
