@@ -273,13 +273,13 @@ def test_mps_auto_batch_uses_memory_estimate(monkeypatch):
     assert out.shape == (4, 2, 8, 4)
 
 
-@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 def test_mps_memory_estimate_uses_recommended_minus_current(monkeypatch):
     """The MPS memory inspection API is specific compared to CUDA/XPU.
 
     In particular, it does not expose mem_get_info, and the available memory is
     therefore estimated as recommended_max_memory minus
-    current_allocated_memory.
+    current_allocated_memory. On unified memory that estimate is then capped
+    by host available RAM, so both sides of the min() must be mocked.
     """
     mgr = InferenceManager(enc_name="tf_col", out_dim=4)
     mgr.configure(device="mps")
@@ -293,13 +293,13 @@ def test_mps_memory_estimate_uses_recommended_minus_current(monkeypatch):
     fake_api.empty_cache = MagicMock()
 
     monkeypatch.setattr(mgr, "_get_device_backend_api", lambda: fake_api)
-    available_mib = mgr.get_available_gpu_memory()
-    assert available_mib == pytest.approx(6 * 1024.0)
 
+    # Host RAM larger than the recommended-minus-current estimate.
     monkeypatch.setattr(mgr, "get_available_cpu_memory", lambda: 16 * 1024.0)
     available_mb = mgr.get_available_gpu_memory()
     assert available_mb == pytest.approx(6 * 1024.0)
 
+    # Host RAM smaller than the estimate: the unified-memory cap wins.
     monkeypatch.setattr(mgr, "get_available_cpu_memory", lambda: 1024.0)
     available_mb = mgr.get_available_gpu_memory()
     assert available_mb == pytest.approx(1024.0)
