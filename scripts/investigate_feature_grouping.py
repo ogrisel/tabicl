@@ -42,9 +42,11 @@ from sklearn.datasets import (
     make_classification,
     make_moons,
 )
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from tabicl import TabICLClassifier
 
@@ -102,18 +104,32 @@ def _binary_auc(y_true, y_pred, y_proba) -> float | None:
     return float(roc_auc_score(y_true, y_pred))
 
 
+def evaluate_predictions(y_test, y_pred, y_proba, n_features: int, elapsed: float) -> dict:
+    return {
+        "accuracy": float(accuracy_score(y_test, y_pred)),
+        "roc_auc": _binary_auc(y_test, y_pred, y_proba),
+        "n_features_model": int(n_features),
+        "seconds": elapsed,
+    }
+
+
 def evaluate_clf(clf: TabICLClassifier, X_train, y_train, X_test, y_test) -> dict:
     t0 = time.perf_counter()
     clf.fit(X_train, y_train)
     y_pred = clf.predict(X_test)
     y_proba = clf.predict_proba(X_test)
     elapsed = time.perf_counter() - t0
-    return {
-        "accuracy": float(accuracy_score(y_test, y_pred)),
-        "roc_auc": _binary_auc(y_test, y_pred, y_proba),
-        "n_features_model": int(getattr(clf, "n_features_in_", X_train.shape[1])),
-        "seconds": elapsed,
-    }
+    return evaluate_predictions(y_test, y_pred, y_proba, getattr(clf, "n_features_in_", X_train.shape[1]), elapsed)
+
+
+def evaluate_logreg(X_train, y_train, X_test, y_test) -> dict:
+    clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
+    t0 = time.perf_counter()
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+    y_proba = clf.predict_proba(X_test)
+    elapsed = time.perf_counter() - t0
+    return evaluate_predictions(y_test, y_pred, y_proba, X_train.shape[1], elapsed)
 
 
 def make_estimator(checkpoint: str, n_estimators: int, random_state: int) -> TabICLClassifier:
@@ -144,6 +160,14 @@ def run_conditions(
         X, y, test_size=test_size, random_state=seed, stratify=y
     )
     rows = []
+    rows.append(
+        {
+            "checkpoint": "logreg",
+            "condition": "original",
+            "pad_H": X.shape[1],
+            **evaluate_logreg(X_train, y_train, X_test, y_test),
+        }
+    )
     for ckpt in checkpoints:
         # Baseline: original columns.
         clf = make_estimator(ckpt, n_estimators, seed)
@@ -175,6 +199,32 @@ def run_conditions(
                 }
             )
     return rows
+
+
+def h_sweep_datasets(n_samples: int, seed: int, max_h: int) -> list[tuple[str, np.ndarray, np.ndarray]]:
+    """Same signal, increasing independent Gaussian noise columns.
+
+    If wrap-around collisions were harmful, TabICL should dip at H=4..6 relative
+    to H>=7 after the extra-noise trend (visible in logistic regression) is
+    taken into account.
+    """
+    rng = np.random.default_rng(seed)
+    out = []
+    for h in range(1, max_h + 1):
+        X = rng.normal(size=(n_samples, h))
+        y = (X[:, 0] > 0).astype(int)
+        out.append((f"sweep_needle_h{h}", X, y))
+    for h in range(1, max_h + 1):
+        X = rng.normal(size=(n_samples, h))
+        if h > 1:
+            X[:, 1:] *= 3.0
+        y = (X[:, 0] > 0).astype(int)
+        out.append((f"sweep_needle_strongnoise_h{h}", X, y))
+    for h in range(2, max_h + 1):
+        X = rng.normal(size=(n_samples, h))
+        y = ((X[:, 0] > 0) ^ (X[:, 1] > 0)).astype(int)
+        out.append((f"sweep_xor_h{h}", X, y))
+    return out
 
 
 def synthetic_datasets(n_samples: int, seed: int) -> list[tuple[str, np.ndarray, np.ndarray]]:
@@ -301,7 +351,50 @@ def summarize(rows: list[dict]) -> dict:
         "pad15_minus_original_when_H_lt_7": pad_deltas("pad_gaussian_15", h_lt_7=True),
         "pad15_minus_original_when_H_ge_7": pad_deltas("pad_gaussian_15", h_lt_7=False),
         "v1_minus_v2_original_accuracy": _delta_stats(v1_minus_v2),
+        "h_sweep": summarize_h_sweep(rows),
     }
+
+
+def summarize_h_sweep(rows: list[dict]) -> dict:
+    """Mean v2 accuracy in the collision band (H=4..6) vs collision-free (H=7..9)."""
+    families = (
+        "sweep_needle",
+        "sweep_needle_strongnoise",
+        "sweep_xor",
+    )
+    out: dict = {}
+    # Include few-shot rows under the same task names; split by family field.
+    for eval_family in ("h_sweep", "h_sweep_fewshot"):
+        family_out = {}
+        for family in families:
+            by_h = {}
+            for r in rows:
+                if r.get("family") != eval_family:
+                    continue
+                if r.get("checkpoint") != CKPT_V2 or r.get("condition") != "original":
+                    continue
+                task = r["task"]
+                if not task.startswith(family + "_h"):
+                    continue
+                if family == "sweep_needle" and task.startswith("sweep_needle_strongnoise"):
+                    continue
+                by_h.setdefault(r["H"], []).append(r["accuracy"])
+            if not by_h:
+                continue
+            mean_by_h = {h: float(np.mean(v)) for h, v in sorted(by_h.items())}
+            band = [mean_by_h[h] for h in (4, 5, 6) if h in mean_by_h]
+            free = [mean_by_h[h] for h in (7, 8, 9) if h in mean_by_h]
+            family_out[family] = {
+                "mean_accuracy_by_H": {str(h): a for h, a in mean_by_h.items()},
+                "mean_H4_to_6": float(np.mean(band)) if band else None,
+                "mean_H7_to_9": float(np.mean(free)) if free else None,
+                "collision_band_minus_free": (
+                    float(np.mean(band) - np.mean(free)) if band and free else None
+                ),
+            }
+        if family_out:
+            out[eval_family] = family_out
+    return out
 
 
 def parse_args() -> argparse.Namespace:
@@ -312,6 +405,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip-v1", action="store_true")
     p.add_argument("--skip-real", action="store_true")
     p.add_argument("--skip-synthetic", action="store_true")
+    p.add_argument("--skip-h-sweep", action="store_true")
+    p.add_argument("--h-sweep-only", action="store_true")
+    p.add_argument("--max-h", type=int, default=None)
     p.add_argument("--output", type=Path, default=RESULTS_PATH)
     return p.parse_args()
 
@@ -321,8 +417,12 @@ def main() -> None:
     n_estimators = args.n_estimators if args.n_estimators is not None else (2 if args.quick else 4)
     n_samples = args.n_samples if args.n_samples is not None else (200 if args.quick else 400)
     n_seeds = 1 if args.quick else 3
+    max_h = args.max_h if args.max_h is not None else (8 if args.quick else 12)
     checkpoints = [CKPT_V2] if args.skip_v1 else [CKPT_V2, CKPT_V1]
     pad_targets = [MIN_H_NO_PAIR_COLLISION] if args.quick else [MIN_H_NO_PAIR_COLLISION, 15]
+    skip_real = args.skip_real or args.h_sweep_only
+    skip_synthetic = args.skip_synthetic or args.h_sweep_only
+    skip_h_sweep = args.skip_h_sweep and not args.h_sweep_only
 
     collisions = [collision_stats(h) for h in range(1, 16)]
     print("=== pair collisions vs H (group size 3, same mode) ===")
@@ -335,8 +435,9 @@ def main() -> None:
     eval_rows: list[dict] = []
     errors: list[dict] = []
 
-    def consume(task_name: str, X, y, seed: int, family: str) -> None:
+    def consume(task_name: str, X, y, seed: int, family: str, pad_targets_override=None) -> None:
         H = int(np.asarray(X).shape[1])
+        pads = pad_targets if pad_targets_override is None else pad_targets_override
         print(f"\n--- {family}/{task_name} seed={seed} H={H} n={len(y)} ---")
         try:
             rows = run_conditions(
@@ -345,7 +446,7 @@ def main() -> None:
                 seed=seed,
                 n_estimators=n_estimators,
                 checkpoints=checkpoints,
-                pad_targets=pad_targets,
+                pad_targets=pads,
             )
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
@@ -361,12 +462,20 @@ def main() -> None:
                 f"acc={rec['accuracy']:.3f} auc={auc_s} {rec['seconds']:.1f}s"
             )
 
-    if not args.skip_synthetic:
+    if not skip_h_sweep:
+        for seed in range(n_seeds):
+            for name, X, y in h_sweep_datasets(n_samples, seed=seed, max_h=max_h):
+                consume(name, X, y, seed=seed, family="h_sweep", pad_targets_override=[])
+            if not args.quick:
+                for name, X, y in h_sweep_datasets(80, seed=seed, max_h=max_h):
+                    consume(name, X, y, seed=seed, family="h_sweep_fewshot", pad_targets_override=[])
+
+    if not skip_synthetic:
         for seed in range(n_seeds):
             for name, X, y in synthetic_datasets(n_samples, seed=seed):
                 consume(name, X, y, seed=seed, family="synthetic")
 
-    if not args.skip_real:
+    if not skip_real:
         for name, X, y in real_datasets(quick=args.quick):
             consume(name, X, y, seed=0, family="real")
 
@@ -376,6 +485,7 @@ def main() -> None:
             "n_estimators": n_estimators,
             "n_samples": n_samples,
             "n_seeds": n_seeds,
+            "max_h": max_h,
             "checkpoints": checkpoints,
             "pad_targets": pad_targets,
             "quick": args.quick,
