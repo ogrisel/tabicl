@@ -220,6 +220,16 @@ class ColEmbedding(nn.Module):
         -------
         Tensor
             Grouped tensor of shape (B, T, G, feature_group_size) where G is the number of groups.
+
+        Notes
+        -----
+        In ``"same"`` mode, group ``j`` contains features ``(j + 2**i) % H`` for
+        ``i = 0, ..., feature_group_size - 1``. Relative to the first member this
+        is the Golomb ruler ``{0, 1, 3, ..., 2**(k-1) - 1}``, so on the line each
+        unordered pair appears in at most one group. Wrapping modulo ``H`` preserves
+        that only when those differences are distinct mod ``H``. With the default
+        group size of 3, slots self-alias for ``H in {1, 2, 3}`` and unordered pairs
+        repeat across groups for ``H in {4, 5, 6}``. See issue 163.
         """
         if not self.feature_group:
             return X.unsqueeze(-1)  # (B, T, H, 1)
