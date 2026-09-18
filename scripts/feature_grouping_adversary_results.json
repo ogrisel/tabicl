@@ -1,0 +1,322 @@
+{
+  "linear_algebra": {
+    "first_slot_is_cyclic_shift": {
+      "1": {
+        "first_slots": [
+          0
+        ],
+        "covers_all_features": true
+      },
+      "2": {
+        "first_slots": [
+          1,
+          0
+        ],
+        "covers_all_features": true
+      },
+      "3": {
+        "first_slots": [
+          1,
+          2,
+          0
+        ],
+        "covers_all_features": true
+      },
+      "4": {
+        "first_slots": [
+          1,
+          2,
+          3,
+          0
+        ],
+        "covers_all_features": true
+      },
+      "5": {
+        "first_slots": [
+          1,
+          2,
+          3,
+          4,
+          0
+        ],
+        "covers_all_features": true
+      },
+      "6": {
+        "first_slots": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          0
+        ],
+        "covers_all_features": true
+      },
+      "7": {
+        "first_slots": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          0
+        ],
+        "covers_all_features": true
+      },
+      "8": {
+        "first_slots": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          0
+        ],
+        "covers_all_features": true
+      },
+      "9": {
+        "first_slots": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          0
+        ],
+        "covers_all_features": true
+      },
+      "10": {
+        "first_slots": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          0
+        ],
+        "covers_all_features": true
+      },
+      "11": {
+        "first_slots": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          0
+        ],
+        "covers_all_features": true
+      },
+      "12": {
+        "first_slots": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          0
+        ],
+        "covers_all_features": true
+      }
+    },
+    "h3_self_alias_still_injective": {
+      "design_matrix_rank": 3,
+      "singular_values": [
+        1.7320508075688774,
+        1.7320508075688772,
+        1.7320508075688772
+      ],
+      "note": "Rank 3: every (x0,x1,x2) is recoverable from the three aliased groups."
+    }
+  },
+  "v2_in_linear": {
+    "model_config_subset": {
+      "col_feature_group": "same",
+      "col_feature_group_size": 3,
+      "col_affine": false,
+      "embed_dim": 128
+    },
+    "in_linear_shape": [
+      128,
+      3
+    ],
+    "in_linear_rank": 3,
+    "singular_values": [
+      2.0702335834503174,
+      0.4340019226074219,
+      0.4220353662967682
+    ],
+    "column_l2_norms": [
+      0.4326562285423279,
+      2.070228099822998,
+      0.42344072461128235
+    ],
+    "reconstruction_mse_from_in_linear": 2.0479512870291533e-31,
+    "weakest_3d_direction": [
+      -0.33912038803100586,
+      -0.002050308743491769,
+      0.9407407641410828
+    ],
+    "condition_number": 4.905355453491211
+  },
+  "attacks": {
+    "default_ensemble": {
+      "needle_h1": {
+        "v1_ungrouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_grouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_minus_v1_accuracy": 0.0
+      },
+      "needle_h3_unit_noise": {
+        "v1_ungrouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_grouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_minus_v1_accuracy": 0.0
+      },
+      "needle_h3_distractor_x100": {
+        "v1_ungrouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_grouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_minus_v1_accuracy": 0.0
+      },
+      "needle_h3_distractor_x1000": {
+        "v1_ungrouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_grouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_minus_v1_accuracy": 0.0
+      },
+      "needle_h3_anticorr_copies": {
+        "v1_ungrouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_grouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_minus_v1_accuracy": 0.0
+      },
+      "xor_h2": {
+        "v1_ungrouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_grouped": {
+          "accuracy": 0.9916666666666667,
+          "roc_auc": 1.0
+        },
+        "v2_minus_v1_accuracy": -0.008333333333333304
+      }
+    },
+    "no_norm_no_shuffle": {
+      "needle_h1": {
+        "v1_ungrouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_grouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_minus_v1_accuracy": 0.0
+      },
+      "needle_h3_unit_noise": {
+        "v1_ungrouped": {
+          "accuracy": 0.9916666666666667,
+          "roc_auc": 1.0
+        },
+        "v2_grouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_minus_v1_accuracy": 0.008333333333333304
+      },
+      "needle_h3_distractor_x100": {
+        "v1_ungrouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_grouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_minus_v1_accuracy": 0.0
+      },
+      "needle_h3_distractor_x1000": {
+        "v1_ungrouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_grouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_minus_v1_accuracy": 0.0
+      },
+      "needle_h3_anticorr_copies": {
+        "v1_ungrouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_grouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_minus_v1_accuracy": 0.0
+      },
+      "xor_h2": {
+        "v1_ungrouped": {
+          "accuracy": 0.9916666666666667,
+          "roc_auc": 1.0
+        },
+        "v2_grouped": {
+          "accuracy": 1.0,
+          "roc_auc": 1.0
+        },
+        "v2_minus_v1_accuracy": 0.008333333333333304
+      }
+    }
+  },
+  "conclusion": "Same-mode grouping is not an information bottleneck: every column remains channel 0 of some group, and v2 in_linear is a well-conditioned injective 3\u2192d map. A predictor that is perfect on ungrouped 1D/2D features can read the same coordinates out of grouped tokens. Frozen-v2 vs frozen-v1 checks on needles, buried-scale distractors, and XOR do not yield a grouped-only failure. A true adversary would need a rank-deficient in_linear, a collapse of the number of tokens (the unused 'valid' mode), or a training-time failure to invert the mixing \u2014 none of which hold for TabICLv2 inference."
+}

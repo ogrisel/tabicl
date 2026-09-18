@@ -97,3 +97,13 @@ def test_self_repeats_when_h_smaller_than_offsets():
     assert same_mode_groups(1) == [(0, 0, 0)]
     # offsets 1, 2, 4 modulo 2 -> (1, 0, 0) for group 0
     assert same_mode_groups(2)[0] == (1, 0, 0)
+
+
+@pytest.mark.parametrize("n_features", [1, 2, 3, 4, 5, 6, 7, 8, 15])
+def test_same_mode_first_slot_is_a_cyclic_shift(n_features):
+    """Channel 0 of group j is feature (j+1) % H: no original column is dropped."""
+    groups = same_mode_groups(n_features)
+    first_slots = [g[0] for g in groups]
+    expected = [(j + 1) % n_features for j in range(n_features)]
+    assert first_slots == expected
+    assert set(first_slots) == set(range(n_features))
