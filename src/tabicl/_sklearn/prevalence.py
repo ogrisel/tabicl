@@ -143,6 +143,97 @@ def _validate_max_imbalance_ratio(max_imbalance_ratio: float | None) -> float | 
     return ratio_limit
 
 
+def majority_undersample_index_sets(
+    y: np.ndarray,
+    max_imbalance_ratio: float | None,
+    n_sets: int,
+    random_state,
+) -> tuple[list[np.ndarray] | None, np.ndarray, np.ndarray]:
+    """Independent majority-class subsamples that share the same class counts.
+
+    Each set keeps every class that is already under the cap, including the
+    rarest class, and draws its own without-replacement subset of each larger
+    class. The draws are sequential on one RNG, so the sets differ when the
+    majority class is larger than the cap. Every set has the same per-class
+    counts, which is the source prior used by the single post-hoc correction.
+
+    Parameters
+    ----------
+    y : ndarray of shape (n_samples,)
+        Integer class labels encoded as ``0 .. n_classes - 1``.
+
+    max_imbalance_ratio : float or None
+        Largest allowed majority-to-minority count ratio. ``None`` and
+        ``inf`` disable undersampling.
+
+    n_sets : int
+        Number of independent index sets. Must be at least 1.
+
+    random_state : int, RandomState, or None
+        Seed for which majority-class rows are kept.
+
+    Returns
+    -------
+    index_sets : list of ndarray, each of shape (n_context,), or None
+        ``None`` when undersampling is a no-op. Otherwise one sorted index
+        array per set. Sorting is only for a stable index set: attention
+        over rows is permutation-equivariant when each row stays tied to
+        its label.
+
+    class_counts : ndarray of shape (n_classes,)
+        Counts in ``y``.
+
+    context_counts : ndarray of shape (n_classes,)
+        Counts inside every returned set. Equal to ``class_counts`` when no
+        rows are dropped.
+    """
+    if n_sets < 1:
+        raise ValueError(f"n_sets must be at least 1, got {n_sets}.")
+
+    y = np.asarray(y)
+    if y.ndim != 1:
+        raise ValueError(f"y must be one-dimensional, got shape {y.shape}.")
+    if y.size == 0:
+        raise ValueError("y must contain at least one sample.")
+    if y.min() < 0:
+        raise ValueError("y must contain non-negative integer class ids.")
+
+    n_classes = int(y.max()) + 1
+    class_counts = np.bincount(y, minlength=n_classes).astype(np.int64, copy=False)
+    if np.any(class_counts == 0):
+        raise ValueError("y is missing a class id between 0 and max(y). Encode labels first.")
+
+    ratio_limit = _validate_max_imbalance_ratio(max_imbalance_ratio)
+    ratio = float(class_counts.max() / class_counts.min())
+    if ratio_limit is None or ratio <= ratio_limit:
+        return None, class_counts, class_counts.copy()
+
+    n_minority = int(class_counts.min())
+    cap = int(np.floor(ratio_limit * float(n_minority) + 1e-8))
+    cap = max(cap, 1)
+    class_rows = [np.flatnonzero(y == class_id) for class_id in range(n_classes)]
+
+    rng = check_random_state(random_state)
+    index_sets = []
+    context_counts = None
+    for _ in range(n_sets):
+        kept = []
+        for rows, count in zip(class_rows, class_counts):
+            chosen = rows
+            if count > cap:
+                chosen = rng.choice(rows, size=cap, replace=False)
+            kept.append(np.asarray(chosen, dtype=np.int64).reshape(-1))
+        indices = np.concatenate(kept)
+        indices.sort()
+        counts = np.bincount(y[indices], minlength=n_classes).astype(np.int64, copy=False)
+        if context_counts is None:
+            context_counts = counts
+        elif not np.array_equal(counts, context_counts):
+            raise RuntimeError("Independent undersamples produced different class counts.")
+        index_sets.append(indices)
+    return index_sets, class_counts, context_counts
+
+
 def majority_undersample_indices(
     y: np.ndarray,
     max_imbalance_ratio: float | None,
@@ -195,41 +286,9 @@ def majority_undersample_indices(
         If ``max_imbalance_ratio`` is below 1, or ``y`` does not contain
         every class id in ``0 .. n_classes - 1``.
     """
-    y = np.asarray(y)
-    if y.ndim != 1:
-        raise ValueError(f"y must be one-dimensional, got shape {y.shape}.")
-    if y.size == 0:
-        raise ValueError("y must contain at least one sample.")
-    if y.min() < 0:
-        raise ValueError("y must contain non-negative integer class ids.")
-
-    n_classes = int(y.max()) + 1
-    class_counts = np.bincount(y, minlength=n_classes).astype(np.int64, copy=False)
-    if np.any(class_counts == 0):
-        raise ValueError("y is missing a class id between 0 and max(y). Encode labels first.")
-
-    ratio_limit = _validate_max_imbalance_ratio(max_imbalance_ratio)
-    ratio = float(class_counts.max() / class_counts.min())
-    if ratio_limit is None or ratio <= ratio_limit:
-        return None, class_counts, class_counts.copy()
-
-    n_minority = int(class_counts.min())
-    cap = int(np.floor(ratio_limit * float(n_minority) + 1e-8))
-    cap = max(cap, 1)
-
-    rng = check_random_state(random_state)
-    kept = []
-    for class_id, count in enumerate(class_counts):
-        class_rows = np.flatnonzero(y == class_id)
-        if count > cap:
-            class_rows = rng.choice(class_rows, size=cap, replace=False)
-        kept.append(np.asarray(class_rows, dtype=np.int64).reshape(-1))
-
-    indices = np.concatenate(kept)
-    # Sort for a stable index set. Row order is not a model input: attention
-    # over rows is permutation-equivariant when features stay tied to labels.
-    indices.sort()
-    # Counts are taken from the selected rows so they cannot drift from the
-    # index set if the per-class draw is ever changed.
-    context_counts = np.bincount(y[indices], minlength=n_classes).astype(np.int64, copy=False)
-    return indices, class_counts, context_counts
+    index_sets, class_counts, context_counts = majority_undersample_index_sets(
+        y, max_imbalance_ratio, n_sets=1, random_state=random_state
+    )
+    if index_sets is None:
+        return None, class_counts, context_counts
+    return index_sets[0], class_counts, context_counts

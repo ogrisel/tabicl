@@ -14,7 +14,10 @@ New features
   is the prior-shift map of Saerens et al. (2002) and reduces to Theorem 2 of
   Elkan (IJCAI 2001) for two classes. On the skewed TabArena tasks in
   ``benchmarks/max_imbalance_ratio``, 20 was the smallest cap whose 5-fold
-  ROC-AUC stayed within one standard deviation of the uncapped run.
+  ROC-AUC stayed within one standard deviation of the uncapped run. Each
+  ensemble member draws its own majority subsample. The Elkan correction is
+  applied once, after members are averaged and, when averaging logits, after
+  the softmax.
 
 - Add TabICLv2 pre-training code (`python -m tabicl.train`): quantile regression training via a
   pinball loss (`--regression_method quantile`) in addition to classification, and the Muon

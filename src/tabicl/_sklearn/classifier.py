@@ -19,7 +19,11 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 
 from .base import TabICLBaseEstimator
 from .preprocessing import TransformToNumerical, EnsembleGenerator
-from .prevalence import _validate_max_imbalance_ratio, correct_class_prior, majority_undersample_indices
+from .prevalence import (
+    _validate_max_imbalance_ratio,
+    correct_class_prior,
+    majority_undersample_index_sets,
+)
 from .sklearn_utils import validate_data, _num_samples
 
 from tabicl import InferenceConfig
@@ -84,17 +88,19 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
     max_imbalance_ratio : float or None, default=None
         Largest majority-to-minority count ratio kept in the in-context
         training set. When ``max(class count) / min(class count)`` in ``y``
-        exceeds this value, majority classes are randomly undersampled
-        (without replacement) so each class has at most
+        exceeds this value, each ensemble member independently undersamples
+        majority classes (without replacement) so that member has at most
         ``max_imbalance_ratio`` times as many rows as the rarest class.
-        The kept rows are stored in their original order. That order is not
-        meaningful to the model: column embedding and in-context attention
-        are permutation-equivariant over rows when each row stays tied to
-        its label, and rotary positions run across features within a row.
-        ``predict_proba`` then applies a multiclass Elkan correction that
-        maps those probabilities back to the class prior of the original
-        ``y``, so the reported probabilities stay calibrated to the
-        imbalance of the data passed to ``fit``.
+        Every member keeps the same class counts; the rows drawn from each
+        majority class differ. The kept rows of a member stay in their
+        original order. That order is not meaningful to the model: column
+        embedding and in-context attention are permutation-equivariant over
+        rows when each row stays tied to its label, and rotary positions run
+        across features within a row.
+        ``predict_proba`` averages the members first (averaging logits, then
+        applying softmax, when ``average_logits`` is True) and only then
+        applies one multiclass Elkan correction. That maps the ensembled
+        probabilities back to the class prior of the original ``y``.
 
         If the natural ratio is already at most ``max_imbalance_ratio``,
         the training rows are left unchanged and no correction is applied.
@@ -277,10 +283,11 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         Equal to ``class_counts_`` when ``max_imbalance_ratio`` does not
         bind.
 
-    context_indices_ : ndarray of shape (n_context,) or None
-        Positions of the undersampled context inside the training matrix
-        seen by the ensemble generator, in increasing order. ``None`` when
-        no rows were dropped.
+    context_indices_ : list of ndarray or None
+        One increasing index array per ensemble member, into the training
+        matrix seen by the ensemble generator. Members share class counts
+        and draw majority rows independently. ``None`` when no rows were
+        dropped.
 
     imbalance_ratio_ : float
         ``max(class_counts_) / min(class_counts_)`` on the original ``y``.
@@ -474,9 +481,10 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
 
         1. Encoding class labels using LabelEncoder
         2. Converting input features to numerical values
-        3. Undersampling majority classes when their count exceeds
-           ``max_imbalance_ratio`` times the rarest class
-        4. Fitting the ensemble generator to create transformed dataset views
+        3. Drawing one majority-class subsample per ensemble member when a
+           class count exceeds ``max_imbalance_ratio`` times the rarest class
+        4. Fitting the ensemble generator so each member is preprocessed on
+           its own subsample
         5. Loading the pre-trained TabICL model
         6. Optionally pre-computing KV caches for training data to speed up inference
            (controlled by the ``kv_cache`` init parameter)
@@ -556,26 +564,25 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         self.X_encoder_ = TransformToNumerical(verbose=self.verbose)
         X = self.X_encoder_.fit_transform(X)
 
-        # Undersample majority classes before they enter the in-context set.
-        # The categorical encoder above is fit on the full table so unknown
-        # categories at predict time still map to the same codes.
-        context_indices, class_counts, context_counts = majority_undersample_indices(
-            y, self.max_imbalance_ratio, self.random_state
+        # One independent majority subsample per ensemble member. The
+        # categorical encoder above is fit on the full table so unknown
+        # categories at predict time still map to the same codes. The Elkan
+        # correction is applied once, after ensembling, in predict_proba.
+        context_indices, class_counts, context_counts = majority_undersample_index_sets(
+            y, self.max_imbalance_ratio, self.n_estimators, self.random_state
         )
         self.class_counts_ = class_counts
         self.context_class_counts_ = context_counts
         self.imbalance_ratio_ = float(class_counts.max() / class_counts.min())
         self.context_indices_ = context_indices
-        if context_indices is not None:
-            if self.verbose:
-                print(
-                    "Undersampled majority classes to respect "
-                    f"max_imbalance_ratio={self.max_imbalance_ratio}: "
-                    f"counts {class_counts.tolist()} -> {context_counts.tolist()} "
-                    f"({len(y)} -> {len(context_indices)} rows)."
-                )
-            X = np.asanyarray(X)[context_indices]
-            y = np.asanyarray(y)[context_indices]
+        if context_indices is not None and self.verbose:
+            print(
+                "Undersampled majority classes independently for each ensemble member "
+                f"to respect max_imbalance_ratio={self.max_imbalance_ratio}: "
+                f"counts {class_counts.tolist()} -> {context_counts.tolist()} "
+                f"({len(y)} -> {len(context_indices[0])} rows per member, "
+                f"{len(context_indices)} members)."
+            )
 
         # Fit ensemble generator to create multiple dataset views
         self.ensemble_generator_ = EnsembleGenerator(
@@ -587,7 +594,14 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
             outlier_threshold=self.outlier_threshold,
             random_state=self.random_state,
         )
-        self.ensemble_generator_.fit(X, y)
+        self.ensemble_generator_.fit(X, y, row_indices=context_indices)
+        if context_indices is not None:
+            # Keep only the subsets that became ensemble members, in the
+            # order their predictions are averaged.
+            used = []
+            for member_indices in self.ensemble_generator_.row_indices_.values():
+                used.extend(member_indices)
+            self.context_indices_ = used
 
         self.model_kv_cache_ = None
         if self.kv_cache:
@@ -747,9 +761,11 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         2. Applies the ensemble generator to create multiple views
         3. Forwards each view through the model
         4. Corrects for class shuffles
-        5. Averages predictions across ensemble members
-        6. Applies the multiclass Elkan correction when majority classes were
-           undersampled, so probabilities match the original class prior
+        5. Averages predictions across ensemble members, and applies softmax to
+           the averaged logits when ``average_logits`` is True
+        6. Applies one multiclass Elkan correction to those ensembled
+           probabilities when majority classes were undersampled, so they
+           match the original class prior
 
         Parameters
         ----------

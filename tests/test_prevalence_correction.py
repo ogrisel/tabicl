@@ -13,7 +13,11 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from tabicl._sklearn.prevalence import correct_class_prior, majority_undersample_indices
+from tabicl._sklearn.prevalence import (
+    correct_class_prior,
+    majority_undersample_index_sets,
+    majority_undersample_indices,
+)
 
 
 def classical_elkan(p, observed_prevalence, target_prevalence):
@@ -155,6 +159,22 @@ def test_undersample_caps_every_majority_class_and_keeps_the_minority():
     assert not np.array_equal(indices, other)
 
 
+def test_independent_index_sets_share_counts_and_differ():
+    y = np.array([0] * 100 + [1] * 8)
+    sets, _counts, context_counts = majority_undersample_index_sets(
+        y, max_imbalance_ratio=5, n_sets=3, random_state=0
+    )
+    assert context_counts.tolist() == [40, 8]
+    assert len(sets) == 3
+    for indices in sets:
+        assert np.bincount(y[indices], minlength=2).tolist() == [40, 8]
+        assert np.all(np.diff(indices) > 0)
+    assert not np.array_equal(sets[0], sets[1])
+    # The single-set helper is the first draw of the same seed.
+    one, _, _ = majority_undersample_indices(y, max_imbalance_ratio=5, random_state=0)
+    assert np.array_equal(one, sets[0])
+
+
 def test_undersample_rejects_ratio_below_one():
     y = np.array([0, 0, 1])
     with pytest.raises(ValueError):
@@ -174,9 +194,8 @@ def _classifier_kwargs():
     )
 
 
-@pytest.mark.parametrize("n_estimators", [1, 2])
 @pytest.mark.parametrize("average_logits", [True, False])
-def test_classifier_applies_multiclass_correction_to_the_undersampled_context(average_logits, n_estimators):
+def test_classifier_applies_multiclass_correction_to_the_undersampled_context(average_logits):
     from tabicl import TabICLClassifier
 
     rng = np.random.RandomState(0)
@@ -185,18 +204,18 @@ def test_classifier_applies_multiclass_correction_to_the_undersampled_context(av
     x_train = rng.normal(size=(len(y_train), 4))
     x_test = rng.normal(size=(12, 4))
 
-    kwargs = _classifier_kwargs()
-    kwargs["n_estimators"] = n_estimators
-    corrected = TabICLClassifier(max_imbalance_ratio=5, average_logits=average_logits, **kwargs)
+    corrected = TabICLClassifier(max_imbalance_ratio=5, average_logits=average_logits, **_classifier_kwargs())
     corrected.fit(x_train, y_train)
     assert corrected.class_counts_.tolist() == [80, 24, 8]
     assert corrected.context_class_counts_.tolist() == [40, 24, 8]
-    assert corrected.context_indices_ is not None
-    assert len(corrected.context_indices_) == 72
-    assert np.all(np.diff(corrected.context_indices_) > 0)
+    assert len(corrected.context_indices_) == 1
+    indices = corrected.context_indices_[0]
+    assert len(indices) == 72
+    assert np.bincount(y_train[indices], minlength=3).tolist() == [40, 24, 8]
+    assert np.all(np.diff(indices) > 0)
 
-    raw = TabICLClassifier(max_imbalance_ratio=None, average_logits=average_logits, **kwargs)
-    raw.fit(x_train[corrected.context_indices_], y_train[corrected.context_indices_])
+    raw = TabICLClassifier(max_imbalance_ratio=None, average_logits=average_logits, **_classifier_kwargs())
+    raw.fit(x_train[indices], y_train[indices])
     expected = correct_class_prior(
         raw.predict_proba(x_test),
         source_prior=corrected.context_class_counts_,
@@ -206,6 +225,61 @@ def test_classifier_applies_multiclass_correction_to_the_undersampled_context(av
     assert_allclose(got, expected, rtol=1e-5, atol=1e-5)
     assert_allclose(got.sum(axis=1), 1.0, atol=1e-5)
     assert np.all(got >= 0.0)
+
+
+@pytest.mark.parametrize("average_logits", [True, False])
+def test_correction_is_applied_once_after_independent_members(average_logits):
+    """Each member has its own majority subsample; Elkan runs after the ensemble."""
+    from tabicl import TabICLClassifier
+
+    rng = np.random.RandomState(0)
+    y_train = np.concatenate([np.full(80, 0), np.full(24, 1), np.full(8, 2)])
+    x_train = rng.normal(size=(len(y_train), 4))
+    x_test = rng.normal(size=(12, 4))
+    common = dict(
+        norm_methods=["none", "power"],
+        feat_shuffle_method="none",
+        class_shuffle_method="none",
+        device="cpu",
+        use_amp=False,
+        use_fa3=False,
+        random_state=0,
+        average_logits=average_logits,
+    )
+    parent = TabICLClassifier(n_estimators=2, max_imbalance_ratio=5, **common).fit(x_train, y_train)
+    member_indices = [
+        idx for indices in parent.ensemble_generator_.row_indices_.values() for idx in indices
+    ]
+    assert len(member_indices) == 2
+    assert not np.array_equal(member_indices[0], member_indices[1])
+
+    member_probas = []
+    for method, indices in parent.ensemble_generator_.row_indices_.items():
+        for idx in indices:
+            child = TabICLClassifier(
+                n_estimators=1, norm_methods=[method], max_imbalance_ratio=None, **{
+                    k: v for k, v in common.items() if k != "norm_methods"
+                }
+            ).fit(x_train[idx], y_train[idx])
+            member_probas.append(child.predict_proba(x_test))
+    stacked = np.stack(member_probas, axis=0)
+    if average_logits:
+        # Child probabilities are softmax(logits / temperature). Averaging the
+        # recovered logits matches averaging the logits, then softmax.
+        recovered = np.log(np.clip(stacked, 1e-12, None))
+        ensembled = recovered.mean(axis=0)
+        ensembled -= ensembled.max(axis=1, keepdims=True)
+        ensembled = np.exp(ensembled)
+        ensembled /= ensembled.sum(axis=1, keepdims=True)
+    else:
+        ensembled = stacked.mean(axis=0)
+        ensembled /= ensembled.sum(axis=1, keepdims=True)
+    expected = correct_class_prior(
+        ensembled, parent.context_class_counts_, parent.class_counts_
+    )
+    got = parent.predict_proba(x_test)
+    assert_allclose(got, expected, rtol=1e-4, atol=1e-4)
+    assert_allclose(got.sum(axis=1), 1.0, atol=1e-5)
 
 
 def test_classifier_imbalance_ratio_is_a_noop_below_the_cap():
