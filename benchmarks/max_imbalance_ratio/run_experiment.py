@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import time
+import warnings
 from pathlib import Path
 
 import matplotlib
@@ -43,6 +44,11 @@ from sklearn.metrics import log_loss, roc_auc_score
 from sklearn.model_selection import StratifiedShuffleSplit, train_test_split
 
 from tabicl import TabICLClassifier
+
+warnings.filterwarnings(
+    "ignore",
+    message="The following categorical columns have a cardinality above 40",
+)
 
 
 # TabArena-v0.1 classification tasks that are small enough to download
@@ -138,63 +144,116 @@ def _pareto_mask(time_s: np.ndarray, score: np.ndarray, *, maximize: bool) -> np
     return keep
 
 
+def _series_pareto(axis, group: pd.DataFrame, score_column: str, *, maximize: bool) -> None:
+    """Scatter one ratio sweep and draw its Pareto front."""
+    group = group.sort_values("fit_predict_seconds")
+    times = group["fit_predict_seconds"].to_numpy()
+    score = group[score_column].to_numpy()
+    axis.scatter(times, score, s=42, color="#1f4e79", zorder=3)
+    for _, row in group.iterrows():
+        axis.annotate(
+            str(row["max_imbalance_ratio"]),
+            (row["fit_predict_seconds"], row[score_column]),
+            textcoords="offset points",
+            xytext=(5, 4),
+            fontsize=8,
+        )
+    front = group.iloc[np.flatnonzero(_pareto_mask(times, score, maximize=maximize))]
+    front = front.sort_values("fit_predict_seconds")
+    axis.plot(
+        front["fit_predict_seconds"],
+        front[score_column],
+        color="#c45c26",
+        linewidth=1.4,
+        zorder=2,
+    )
+    axis.grid(True, alpha=0.3)
+
+
+def _largest_slice(results: pd.DataFrame, n_estimators: int) -> pd.DataFrame:
+    subset = results[results["n_estimators"] == n_estimators]
+    if subset.empty:
+        return subset
+    max_size = subset.groupby("dataset")["train_size"].transform("max")
+    return subset[subset["train_size"] == max_size]
+
+
+def _panel_figure(results: pd.DataFrame, datasets: list[str], score_column: str, *, maximize: bool, title: str, ylabel: str, path: Path) -> None:
+    present = [name for name in datasets if name in set(results["dataset"])]
+    if not present:
+        return
+    n_cols = 4 if len(present) > 4 else len(present)
+    n_rows = int(np.ceil(len(present) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.0 * n_cols, 3.5 * n_rows), squeeze=False)
+    for axis in axes.ravel():
+        axis.set_visible(False)
+    for axis, dataset in zip(axes.ravel(), present):
+        axis.set_visible(True)
+        group = results[results["dataset"] == dataset]
+        _series_pareto(axis, group, score_column, maximize=maximize)
+        n_train = int(group["train_size"].iloc[0])
+        ratio = float(group["natural_ratio"].iloc[0])
+        n_classes = int(group["n_classes"].iloc[0])
+        axis.set_title(f"{dataset}\n{n_classes} classes, ratio {ratio:.0f}×, n={n_train}", fontsize=9)
+        axis.set_xlabel("fit + predict time (s)")
+        axis.set_ylabel(ylabel)
+    fig.suptitle(title, fontsize=12)
+    fig.tight_layout()
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+
+
 def _plot(results: pd.DataFrame, output_dir: Path) -> None:
     if results.empty:
         return
-    datasets = list(dict.fromkeys(results["dataset"]))
-    n_panels = len(datasets)
-    fig, axes = plt.subplots(1, n_panels, figsize=(4.4 * n_panels, 4.2), squeeze=False, sharey=False)
-    loss_fig, loss_axes = plt.subplots(1, n_panels, figsize=(4.4 * n_panels, 4.2), squeeze=False, sharey=False)
-
-    for axis, loss_axis, dataset in zip(axes[0], loss_axes[0], datasets):
-        subset = results[results["dataset"] == dataset]
-        for (train_size, n_estimators), group in subset.groupby(["train_size", "n_estimators"]):
-            group = group.sort_values("fit_predict_seconds")
-            times = group["fit_predict_seconds"].to_numpy()
-            auc = group["roc_auc"].to_numpy()
-            loss = group["log_loss"].to_numpy()
-            label = f"n_train={int(train_size)}, n_est={int(n_estimators)}"
-            axis.scatter(times, auc, s=36, label=label)
-            loss_axis.scatter(times, loss, s=36, label=label)
-            for _, row in group.iterrows():
-                axis.annotate(
-                    row["max_imbalance_ratio"],
-                    (row["fit_predict_seconds"], row["roc_auc"]),
-                    textcoords="offset points",
-                    xytext=(4, 4),
-                    fontsize=8,
-                )
-                loss_axis.annotate(
-                    row["max_imbalance_ratio"],
-                    (row["fit_predict_seconds"], row["log_loss"]),
-                    textcoords="offset points",
-                    xytext=(4, 4),
-                    fontsize=8,
-                )
-            auc_front = group.iloc[np.flatnonzero(_pareto_mask(times, auc, maximize=True))]
-            loss_front = group.iloc[np.flatnonzero(_pareto_mask(times, loss, maximize=False))]
-            auc_front = auc_front.sort_values("fit_predict_seconds")
-            loss_front = loss_front.sort_values("fit_predict_seconds")
-            axis.plot(auc_front["fit_predict_seconds"], auc_front["roc_auc"], linewidth=1.2)
-            loss_axis.plot(loss_front["fit_predict_seconds"], loss_front["log_loss"], linewidth=1.2)
-        axis.set_title(dataset)
-        axis.set_xlabel("fit + predict time (s)")
-        axis.set_ylabel("ROC-AUC")
-        axis.grid(True, alpha=0.3)
-        loss_axis.set_title(dataset)
-        loss_axis.set_xlabel("fit + predict time (s)")
-        loss_axis.set_ylabel("log-loss")
-        loss_axis.grid(True, alpha=0.3)
-    axes[0, 0].legend(fontsize=8, loc="best")
-    loss_axes[0, 0].legend(fontsize=8, loc="best")
-    fig.suptitle("max_imbalance_ratio: ROC-AUC vs fit+predict time", fontsize=12)
-    loss_fig.suptitle("max_imbalance_ratio: log-loss vs fit+predict time", fontsize=12)
-    fig.tight_layout()
-    loss_fig.tight_layout()
-    fig.savefig(output_dir / "pareto_roc_auc.png", dpi=140)
-    loss_fig.savefig(output_dir / "pareto_log_loss.png", dpi=140)
-    plt.close(fig)
-    plt.close(loss_fig)
+    dataset_order = [
+        "APSFailure",
+        "kddcup09_appetency",
+        "taiwanese_bankruptcy_prediction",
+        "coil2000_insurance_policies",
+        "polish_companies_bankruptcy",
+        "seismic-bumps",
+        "anneal",
+        "MIC",
+    ]
+    largest = _largest_slice(results, n_estimators=1)
+    _panel_figure(
+        largest,
+        dataset_order,
+        "roc_auc",
+        maximize=True,
+        title="Largest training slice, 1 estimator: ROC-AUC vs fit+predict time",
+        ylabel="ROC-AUC",
+        path=output_dir / "pareto_roc_auc.png",
+    )
+    _panel_figure(
+        largest,
+        dataset_order,
+        "log_loss",
+        maximize=False,
+        title="Largest training slice, 1 estimator: log-loss vs fit+predict time",
+        ylabel="log-loss",
+        path=output_dir / "pareto_log_loss.png",
+    )
+    ensemble = _largest_slice(results, n_estimators=4)
+    _panel_figure(
+        ensemble,
+        dataset_order,
+        "roc_auc",
+        maximize=True,
+        title="4 estimators: ROC-AUC vs fit+predict time",
+        ylabel="ROC-AUC",
+        path=output_dir / "pareto_roc_auc_ensemble.png",
+    )
+    _panel_figure(
+        ensemble,
+        dataset_order,
+        "log_loss",
+        maximize=False,
+        title="4 estimators: log-loss vs fit+predict time",
+        ylabel="log-loss",
+        path=output_dir / "pareto_log_loss_ensemble.png",
+    )
 
 
 def run(args) -> None:
