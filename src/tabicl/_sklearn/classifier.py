@@ -87,7 +87,10 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         exceeds this value, majority classes are randomly undersampled
         (without replacement) so each class has at most
         ``max_imbalance_ratio`` times as many rows as the rarest class.
-        Kept rows stay in their original order.
+        The kept rows are stored in their original order. That order is not
+        meaningful to the model: column embedding and in-context attention
+        are permutation-equivariant over rows when each row stays tied to
+        its label, and rotary positions run across features within a row.
         ``predict_proba`` then applies a multiclass Elkan correction that
         maps those probabilities back to the class prior of the original
         ``y``, so the reported probabilities stay calibrated to the
@@ -275,7 +278,8 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
 
     context_indices_ : ndarray of shape (n_context,) or None
         Positions of the undersampled context inside the training matrix
-        seen by the ensemble generator. ``None`` when no rows were dropped.
+        seen by the ensemble generator, in increasing order. ``None`` when
+        no rows were dropped.
 
     imbalance_ratio_ : float
         ``max(class_counts_) / min(class_counts_)`` on the original ``y``.

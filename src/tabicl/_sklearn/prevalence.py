@@ -169,14 +169,18 @@ def majority_undersample_indices(
         majority undersampling cannot make a class rarer than the minority.
 
     random_state : int, RandomState, or None
-        Seed for the subsample and for shuffling the kept rows.
+        Seed for which majority-class rows are kept.
 
     Returns
     -------
     indices : ndarray of shape (n_context,) or None
-        Positions into ``y`` to keep, sorted so the original row order is
-        preserved. ``None`` when undersampling is a no-op. Row order is
-        meaningful: the in-context transformer uses rotary positions.
+        Positions into ``y`` to keep, sorted into the original row order.
+        ``None`` when undersampling is a no-op. Sorting is for a stable
+        index set. Column embedding and in-context attention are
+        permutation-equivariant over rows when each row stays tied to its
+        label, so a shuffle of the same rows changes predictions only at
+        floating-point noise. Rotary positions are applied across features
+        within a row, not across training rows.
 
     class_counts : ndarray of shape (n_classes,)
         Counts in ``y``.
@@ -222,9 +226,8 @@ def majority_undersample_indices(
         kept.append(np.asarray(class_rows, dtype=np.int64).reshape(-1))
 
     indices = np.concatenate(kept)
-    # Restore the original row order. The row encoder uses rotary positions,
-    # so an arbitrary shuffle would move every kept row, not only drop the
-    # majority-class rows that exceeded the cap.
+    # Sort for a stable index set. Row order is not a model input: attention
+    # over rows is permutation-equivariant when features stay tied to labels.
     indices.sort()
     # Counts are taken from the selected rows so they cannot drift from the
     # index set if the per-class draw is ever changed.
