@@ -143,6 +143,8 @@ def test_undersample_caps_every_majority_class_and_keeps_the_minority():
     assert context_counts.tolist() == [40, 40, 8]
     assert indices is not None
     assert len(indices) == 88
+    assert np.all(np.diff(indices) > 0)
+    assert np.bincount(y[indices], minlength=3).tolist() == context_counts.tolist()
     minority_rows = set(np.flatnonzero(y == 2).tolist())
     assert minority_rows.issubset(set(indices.tolist()))
     assert context_counts.max() / context_counts.min() <= 5
@@ -172,8 +174,9 @@ def _classifier_kwargs():
     )
 
 
+@pytest.mark.parametrize("n_estimators", [1, 2])
 @pytest.mark.parametrize("average_logits", [True, False])
-def test_classifier_applies_multiclass_correction_to_the_undersampled_context(average_logits):
+def test_classifier_applies_multiclass_correction_to_the_undersampled_context(average_logits, n_estimators):
     from tabicl import TabICLClassifier
 
     rng = np.random.RandomState(0)
@@ -182,14 +185,17 @@ def test_classifier_applies_multiclass_correction_to_the_undersampled_context(av
     x_train = rng.normal(size=(len(y_train), 4))
     x_test = rng.normal(size=(12, 4))
 
-    corrected = TabICLClassifier(max_imbalance_ratio=5, average_logits=average_logits, **_classifier_kwargs())
+    kwargs = _classifier_kwargs()
+    kwargs["n_estimators"] = n_estimators
+    corrected = TabICLClassifier(max_imbalance_ratio=5, average_logits=average_logits, **kwargs)
     corrected.fit(x_train, y_train)
     assert corrected.class_counts_.tolist() == [80, 24, 8]
     assert corrected.context_class_counts_.tolist() == [40, 24, 8]
     assert corrected.context_indices_ is not None
     assert len(corrected.context_indices_) == 72
+    assert np.all(np.diff(corrected.context_indices_) > 0)
 
-    raw = TabICLClassifier(max_imbalance_ratio=None, average_logits=average_logits, **_classifier_kwargs())
+    raw = TabICLClassifier(max_imbalance_ratio=None, average_logits=average_logits, **kwargs)
     raw.fit(x_train[corrected.context_indices_], y_train[corrected.context_indices_])
     expected = correct_class_prior(
         raw.predict_proba(x_test),

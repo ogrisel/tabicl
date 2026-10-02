@@ -19,7 +19,7 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 
 from .base import TabICLBaseEstimator
 from .preprocessing import TransformToNumerical, EnsembleGenerator
-from .prevalence import correct_class_prior, majority_undersample_indices
+from .prevalence import _validate_max_imbalance_ratio, correct_class_prior, majority_undersample_indices
 from .sklearn_utils import validate_data, _num_samples
 
 from tabicl import InferenceConfig
@@ -502,6 +502,9 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         if y is None:
             raise ValueError("This classifier requires y to be passed, but the target y is None.")
 
+        # Reject a bad cap before loading the checkpoint.
+        _validate_max_imbalance_ratio(self.max_imbalance_ratio)
+
         X, y = validate_data(self, X, y, dtype=None, skip_check_array=True)
         check_classification_targets(y)
 
@@ -841,11 +844,27 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         # Normalize probabilities, then undo the prior shift induced by
         # majority undersampling. Equal counts mean the parameter was a no-op,
         # in which case the values returned above are left untouched.
+        # Estimators pickled before this parameter existed have neither count
+        # vector; treat that as "no correction".
         proba = avg / avg.sum(axis=1, keepdims=True)
-        if not np.array_equal(self.class_counts_, self.context_class_counts_):
-            corrected = correct_class_prior(proba, self.context_class_counts_, self.class_counts_)
-            proba = corrected.astype(proba.dtype, copy=False)
-        return proba
+        class_counts = getattr(self, "class_counts_", None)
+        context_counts = getattr(self, "context_class_counts_", None)
+        if (
+            class_counts is None
+            or context_counts is None
+            or proba.shape[0] == 0
+            or np.array_equal(class_counts, context_counts)
+        ):
+            return proba
+        if proba.shape[1] != len(class_counts):
+            raise ValueError(
+                f"predict_proba returned {proba.shape[1]} columns but class_counts_ "
+                f"has length {len(class_counts)}. Refit the classifier."
+            )
+        corrected = correct_class_prior(proba, context_counts, class_counts)
+        proba = corrected.astype(proba.dtype, copy=False)
+        row_sum = proba.sum(axis=1, keepdims=True)
+        return proba / row_sum
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Predict class labels for test samples.

@@ -7,8 +7,9 @@ New features
 - ``TabICLClassifier(max_imbalance_ratio=5)`` undersamples majority classes in the
   in-context training set whenever the majority-to-minority count ratio exceeds
   this value, then applies a multiclass Elkan correction so ``predict_proba``
-  stays calibrated to the class prior of the original ``y``. The correction is
-  the prior-shift map of Saerens et al. (2002) and reduces to Theorem 2 of
+  stays calibrated to the class prior of the original ``y``. Kept rows stay in
+  their original order (the row encoder uses rotary positions). The correction
+  is the prior-shift map of Saerens et al. (2002) and reduces to Theorem 2 of
   Elkan (IJCAI 2001) for two classes. The parameter is a no-op when the
   training labels are already within the ratio (or when set to ``None`` / ``inf``).
 

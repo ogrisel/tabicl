@@ -174,8 +174,9 @@ def majority_undersample_indices(
     Returns
     -------
     indices : ndarray of shape (n_context,) or None
-        Positions into ``y`` to keep. ``None`` when undersampling is a no-op.
-        Kept rows are shuffled.
+        Positions into ``y`` to keep, sorted so the original row order is
+        preserved. ``None`` when undersampling is a no-op. Row order is
+        meaningful: the in-context transformer uses rotary positions.
 
     class_counts : ndarray of shape (n_classes,)
         Counts in ``y``.
@@ -214,14 +215,18 @@ def majority_undersample_indices(
 
     rng = check_random_state(random_state)
     kept = []
-    context_counts = class_counts.copy()
     for class_id, count in enumerate(class_counts):
         class_rows = np.flatnonzero(y == class_id)
         if count > cap:
             class_rows = rng.choice(class_rows, size=cap, replace=False)
-            context_counts[class_id] = cap
-        kept.append(np.asarray(class_rows, dtype=np.int64))
+        kept.append(np.asarray(class_rows, dtype=np.int64).reshape(-1))
 
     indices = np.concatenate(kept)
-    rng.shuffle(indices)
+    # Restore the original row order. The row encoder uses rotary positions,
+    # so an arbitrary shuffle would move every kept row, not only drop the
+    # majority-class rows that exceeded the cap.
+    indices.sort()
+    # Counts are taken from the selected rows so they cannot drift from the
+    # index set if the per-class draw is ever changed.
+    context_counts = np.bincount(y[indices], minlength=n_classes).astype(np.int64, copy=False)
     return indices, class_counts, context_counts
