@@ -81,12 +81,13 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         Whether to average the logits (True) or probabilities (False) of ensemble members.
         Averaging logits often produces better calibrated probabilities.
 
-    max_imbalance_ratio : float or None, default=5
+    max_imbalance_ratio : float or None, default=20
         Largest majority-to-minority count ratio kept in the in-context
         training set. When ``max(class count) / min(class count)`` in ``y``
         exceeds this value, majority classes are randomly undersampled
         (without replacement) so each class has at most
         ``max_imbalance_ratio`` times as many rows as the rarest class.
+        Kept rows stay in their original order.
         ``predict_proba`` then applies a multiclass Elkan correction that
         maps those probabilities back to the class prior of the original
         ``y``, so the reported probabilities stay calibrated to the
@@ -327,7 +328,7 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         outlier_threshold: float = 4.0,
         softmax_temperature: float = 0.9,
         average_logits: bool = True,
-        max_imbalance_ratio: float | None = 5,
+        max_imbalance_ratio: float | None = 20,
         support_many_classes: bool = True,
         batch_size: Optional[int] = 8,
         kv_cache: bool | str = False,

@@ -165,9 +165,14 @@ def summarize(results: pd.DataFrame) -> pd.DataFrame:
             }
         )
     summary = pd.DataFrame(rows)
-    # Stable cap order for plotting annotations.
-    order = {"none": 1000}
-    summary["_order"] = summary["max_imbalance_ratio"].map(lambda value: order.get(str(value), float(value)))
+
+    def _cap_order(value: object) -> float:
+        text = str(value)
+        if text == "none":
+            return 1e9
+        return float(text)
+
+    summary["_order"] = summary["max_imbalance_ratio"].map(_cap_order)
     return summary.sort_values(["dataset", "_order"]).drop(columns="_order")
 
 

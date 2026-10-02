@@ -4,7 +4,7 @@
 New features
 ------------
 
-- ``TabICLClassifier(max_imbalance_ratio=5)`` undersamples majority classes in the
+- ``TabICLClassifier(max_imbalance_ratio=20)`` undersamples majority classes in the
   in-context training set whenever the majority-to-minority count ratio exceeds
   this value, then applies a multiclass Elkan correction so ``predict_proba``
   stays calibrated to the class prior of the original ``y``. Kept rows stay in
@@ -12,6 +12,9 @@ New features
   is the prior-shift map of Saerens et al. (2002) and reduces to Theorem 2 of
   Elkan (IJCAI 2001) for two classes. The parameter is a no-op when the
   training labels are already within the ratio (or when set to ``None`` / ``inf``).
+  The default of 20 is the smallest cap whose 5-fold ROC-AUC stayed within one
+  standard deviation of the uncapped run on every skewed TabArena task in
+  ``benchmarks/max_imbalance_ratio``.
 
 - Add TabICLv2 pre-training code (`python -m tabicl.train`): quantile regression training via a
   pinball loss (`--regression_method quantile`) in addition to classification, and the Muon

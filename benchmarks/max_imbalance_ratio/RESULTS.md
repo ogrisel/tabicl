@@ -1,96 +1,72 @@
-# `max_imbalance_ratio` on imbalanced TabArena tasks
+# 5-fold CV of `max_imbalance_ratio`
 
-CPU timings of `TabICLClassifier` on classification tasks from TabArena-v0.1
-(OpenML suite 457). Each point is one imbalance cap. The orange line is the
-Pareto front: higher ROC-AUC and lower fit+predict time, or lower log-loss
-and lower time.
+Stratified 5-fold CV (`shuffle=True`, `random_state=0`) of
+`TabICLClassifier(n_estimators=1, norm_methods=["none"], device="cpu")` on
+TabArena-v0.1 classification tasks. APSFailure (76k rows) and
+kddcup09_appetency (50k rows) are stratified down to 12,000 rows before the
+split; every other task is used in full. Caps are `{1, 3, 5, 10, 15, 20, 30,
+None}`. The same folds are reused for every cap.
 
-Protocol: one stratified 75/25 split (`random_state=0`). The test slice is
-capped at 800 rows. Training rows are a stratified subsample of the requested
-size, shared by every cap. `device="cpu"`, `use_amp=False`. One estimator uses
-`norm_methods=["none"]`; four estimators use `["none", "power"]`. Caps that
-sit above the natural majority/minority ratio do not drop rows. On those
-runs the ROC-AUC and log-loss match the uncapped run exactly (seismic-bumps,
-coil2000, and polish at cap 20).
+Points are fold means. Horizontal bars are the standard deviation of
+fit+predict time, vertical bars the standard deviation of the metric. The
+orange line is the Pareto front of the means. Fold-level rows are in
+`results_cv.csv`; means are in `results_cv_summary.csv`. `results.csv` is an
+earlier single-split sweep and is not used in the figures below.
 
-Binary ROC-AUC does not depend on the Elkan correction: for two classes the
-map is strictly increasing in the positive probability. AUC gaps across caps
-are the effect of the shorter context. Log-loss moves for both reasons.
-With more than two classes the normalizer depends on the features, so
-one-vs-rest AUC can move as well.
+A cap at or above the training fold's natural ratio does not drop rows.
+ROC-AUC and log-loss then match the uncapped run on every fold (seismic-bumps,
+coil2000, and polish at caps 15 and above; students dropout, ratio 2.8, at
+every cap above 1).
 
-## ROC-AUC vs time, largest training slice
+Binary ROC-AUC does not move because of the Elkan correction itself: for two
+classes the map is strictly increasing. AUC gaps are the effect of the shorter
+context. Log-loss moves for both reasons. With more than two classes the
+normalizer depends on the features, so one-vs-rest AUC can move as well.
 
-One estimator. Labels are the cap (`none` keeps every training row).
+## ROC-AUC
 
-![ROC-AUC Pareto, one estimator](pareto_roc_auc.png)
+![ROC-AUC, 5-fold mean ± 1 std](pareto_roc_auc.png)
 
-| Task | Classes | Natural ratio | n | Time, no cap | Time, cap 5 | Speedup | ROC-AUC, no cap | ROC-AUC, cap 5 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| APSFailure | 2 | 54× | 8000 | 18.1 s | 2.7 s | 6.8× | 0.995 | 0.994 |
-| kddcup09_appetency | 2 | 55× | 8000 | 20.4 s | 3.2 s | 6.4× | 0.916 | 0.929 |
-| taiwanese_bankruptcy_prediction | 2 | 30× | 5114 | 6.4 s | 1.6 s | 3.9× | 0.947 | 0.941 |
-| coil2000_insurance_policies | 2 | 16× | 7366 | 9.4 s | 3.1 s | 3.0× | 0.820 | 0.825 |
-| polish_companies_bankruptcy | 2 | 13× | 4432 | 5.1 s | 2.2 s | 2.3× | 0.979 | 0.969 |
-| seismic-bumps | 2 | 14× | 1938 | 0.91 s | 0.50 s | 1.8× | 0.786 | 0.779 |
-| anneal | 5 | 86× | 673 | 0.51 s | 0.31 s | 1.7× | 1.000 | 0.989 |
-| MIC | 8 | 119× | 1274 | 2.0 s | 0.84 s | 2.4× | 0.904 | 0.884 |
+## Log-loss
 
-Cap 5 is on the ROC-AUC Pareto front for APSFailure, kddcup09_appetency,
-coil2000, polish, and seismic-bumps. On kddcup09_appetency and coil2000 it
-also beats the full context on ROC-AUC, so the uncapped run is dominated.
-On taiwanese bankruptcy the front prefers cap 10 (AUC 0.949 at 2.4 s) over
-cap 5 (0.941 at 1.6 s). On MIC, cap 20 keeps the AUC of the full context
-(0.906 vs 0.904) at about half the time; cap 5 costs about 0.02 AUC.
-Forcing a balanced context (cap 1) is the fastest point and is usually on
-the front, but it is the one that gives up the most AUC (about 0.01 to 0.07).
+![Log-loss, 5-fold mean ± 1 std](pareto_log_loss.png)
 
-The same shape shows up with four estimators. APSFailure at 5,000 rows drops
-from 46 s to 9.6 s at cap 5, with ROC-AUC 0.996 to 0.989.
+## Paired comparison with the full context
 
-![ROC-AUC Pareto, four estimators](pareto_roc_auc_ensemble.png)
+`Δ` is the mean over folds of (capped − uncapped) on the same fold, and the
+± term is the standard deviation of that paired difference.
 
-Times were not averaged. Sub-second runs move by a few tenths of a second
-between repeats; speedups of 2× and more do not.
+| Task | Ratio | Cap 20 time | Speedup | Δ ROC-AUC | Δ log-loss |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| APSFailure (n=12000) | 54× | 10.6 s vs 24.3 s | 2.3× | −0.0007 ± 0.0007 | +0.0016 ± 0.0013 |
+| kddcup09_appetency (n=12000) | 55× | 11.9 s vs 27.4 s | 2.3× | −0.0010 ± 0.0088 | −0.0010 ± 0.0012 |
+| taiwanese bankruptcy | 30× | 5.4 s vs 8.4 s | 1.6× | −0.0018 ± 0.0016 | +0.0015 ± 0.0013 |
+| MIC (8 classes) | 119× | 1.07 s vs 2.20 s | 2.1× | −0.0047 ± 0.0077 | +0.0055 ± 0.0057 |
+| anneal (5 classes) | 86× | 0.38 s vs 0.52 s | 1.4× | −0.0009 ± 0.0013 | +0.0161 ± 0.0130 |
+| coil2000, polish, seismic, students | ≤16× | same context | 1× | 0 | 0 |
 
-## Log-loss vs time
+Cap 5, by comparison, is not inside the fold noise on the multiclass tasks:
+MIC loses 0.026 ± 0.014 ROC-AUC, and anneal log-loss rises from 0.016 to
+0.054 (paired +0.038 ± 0.031). Taiwanese bankruptcy loses 0.0054 ± 0.0017
+ROC-AUC. Those drops are small next to the raw fold scatter on some binary
+tasks, but they are systematic.
 
-Log-loss is the metric the prior correction is aimed at. A shorter context
-still throws away majority-class rows, so log-loss can rise even after the
-correction. On the two largest binary tasks the corrected cap is as good as
-or better than the full context.
+Cap 30 is the first value that also puts anneal's log-loss back inside one
+standard deviation of the paired differences (+0.011 ± 0.014, 0.027 vs 0.016).
+The speedups shrink with it: about 1.7× on APSFailure and kddcup09_appetency
+instead of 2.3×.
 
-![Log-loss Pareto, one estimator](pareto_log_loss.png)
+## Recommendation
 
-A direct ablation, same fitted model, correction toggled off by pretending
-the original counts equal the context counts (`max_imbalance_ratio=5`,
-2,000 rows except anneal and MIC, which use the full training split):
+Use **`max_imbalance_ratio=20`** as the default.
 
-| Task | ROC-AUC corrected | ROC-AUC uncorrected | Log-loss corrected | Log-loss uncorrected |
-| --- | ---: | ---: | ---: | ---: |
-| APSFailure | 0.986 | 0.986 | 0.037 | 0.068 |
-| kddcup09_appetency | 0.914 | 0.914 | 0.065 | 0.165 |
-| anneal | 0.989 | 0.990 | 0.129 | 0.192 |
-| MIC | 0.884 | 0.880 | 0.495 | 0.992 |
+It is the smallest cap in this grid whose ROC-AUC change is within one
+standard deviation of the paired fold differences on every task, including
+MIC. On tasks whose natural ratio is already below 20 it is exactly a no-op,
+so balanced and mildly imbalanced tables are untouched. On the ratio-50+
+tasks it cuts fit+predict time by about 2.3× for a sub-0.001 ROC-AUC change.
 
-On the binary tasks the AUC is identical, as the monotone map requires.
-Mean predicted probabilities move onto the original training prior (APSFailure
-majority mass 0.951 without the correction, 0.984 with it, training prior
-0.982). On MIC the majority class mean goes from 0.47 to 0.84, against a
-training prior of 0.84, and log-loss halves. Anneal's one-vs-rest AUC shifts
-by 0.001 because the multiclass normalizer depends on the features.
-
-## Reproduce
-
-```bash
-python benchmarks/max_imbalance_ratio/run_experiment.py \
-    --datasets seismic-bumps anneal MIC polish_companies_bankruptcy \
-        taiwanese_bankruptcy_prediction coil2000_insurance_policies \
-        APSFailure kddcup09_appetency \
-    --train-sizes 800 2000 5000 8000 \
-    --ratios none 20 10 5 2 1 \
-    --n-estimators 1
-```
-
-Rows already present in `results.csv` are skipped. Plots are rewritten from
-that file at the end of the run.
+Set it to **30** when log-loss on a tiny multiclass problem matters more than
+that extra speed (anneal is the case that still moves at 20). Set it to
+**`None`** to disable undersampling. Do not default to 5 or below: the time
+savings are larger, but MIC and anneal lose accuracy beyond fold noise.
