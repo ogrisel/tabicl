@@ -81,7 +81,7 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         Whether to average the logits (True) or probabilities (False) of ensemble members.
         Averaging logits often produces better calibrated probabilities.
 
-    max_imbalance_ratio : float or None, default=20
+    max_imbalance_ratio : float or None, default=None
         Largest majority-to-minority count ratio kept in the in-context
         training set. When ``max(class count) / min(class count)`` in ``y``
         exceeds this value, majority classes are randomly undersampled
@@ -98,9 +98,10 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
 
         If the natural ratio is already at most ``max_imbalance_ratio``,
         the training rows are left unchanged and no correction is applied.
-        ``None`` and ``inf`` disable undersampling. Values below 1 are
-        invalid: dropping majority rows cannot make a class rarer than the
-        minority class.
+        ``None`` (the default) and ``inf`` disable undersampling, which
+        leaves predictions identical to the full training context. Values
+        below 1 are invalid: dropping majority rows cannot make a class
+        rarer than the minority class.
 
         The correction is the prior-shift adjustment of Saerens et al.
         (2002), which reduces to Theorem 2 of Elkan (IJCAI 2001) for two
@@ -332,7 +333,7 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         outlier_threshold: float = 4.0,
         softmax_temperature: float = 0.9,
         average_logits: bool = True,
-        max_imbalance_ratio: float | None = 20,
+        max_imbalance_ratio: float | None = None,
         support_many_classes: bool = True,
         batch_size: Optional[int] = 8,
         kv_cache: bool | str = False,

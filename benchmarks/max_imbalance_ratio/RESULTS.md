@@ -58,15 +58,15 @@ instead of 2.3×.
 
 ## Recommendation
 
-Use **`max_imbalance_ratio=20`** as the default.
+The estimator default is **`None`**, so the full training context is used
+unless a cap is requested.
 
-It is the smallest cap in this grid whose ROC-AUC change is within one
-standard deviation of the paired fold differences on every task, including
-MIC. On tasks whose natural ratio is already below 20 it is exactly a no-op,
-so balanced and mildly imbalanced tables are untouched. On the ratio-50+
-tasks it cuts fit+predict time by about 2.3× for a sub-0.001 ROC-AUC change.
+When enabling the cap, **20** is the smallest value in this grid whose
+ROC-AUC change is within one standard deviation of the paired fold
+differences on every task, including MIC. On tasks whose natural ratio is
+already below 20 it is exactly a no-op. On the ratio-50+ tasks it cuts
+fit+predict time by about 2.3× for a sub-0.001 ROC-AUC change.
 
-Set it to **30** when log-loss on a tiny multiclass problem matters more than
-that extra speed (anneal is the case that still moves at 20). Set it to
-**`None`** to disable undersampling. Do not default to 5 or below: the time
-savings are larger, but MIC and anneal lose accuracy beyond fold noise.
+Use **30** when log-loss on a tiny multiclass problem matters more than that
+extra speed (anneal is the case that still moves at 20). Caps of 5 and below
+save more time, but MIC and anneal lose accuracy beyond fold noise.
