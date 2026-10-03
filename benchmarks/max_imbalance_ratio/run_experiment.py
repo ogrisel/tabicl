@@ -1,9 +1,10 @@
 """5-fold CV of class-aware vs size-matched uniform subsampling.
 
-Each ensemble member draws its own subsample. The class-aware draw is
-``TabICLClassifier(max_imbalance_ratio=...)``. The uniform draw keeps the
-same number of rows but chooses them uniformly, with no Elkan correction.
-Caps that do not change the training set are evaluated once and reused.
+Each ensemble member draws its own subsample inside ``TabICLClassifier``.
+The class-aware draw is ``max_imbalance_ratio``. The uniform draw passes
+the same row count as ``subsample`` and leaves ``max_imbalance_ratio``
+unset, so the estimator samples uniformly and skips the Elkan correction.
+Datasets are not cut down before ``fit``.
 
 ``n_estimators`` in ``{1, 4, 8}`` and caps in
 ``{1, 3, 5, 10, 15, 20, 30, None}``. Completed folds are appended to
@@ -11,7 +12,7 @@ Caps that do not change the training set are evaluated once and reused.
 
 Pending folds are run shortest prediction first. After each batch the
 prediction is rebuilt from the folds just measured. A fold is not started
-when that prediction is above 15 seconds. Skips are listed in
+when that prediction is above 60 seconds. Skips are listed in
 ``skipped_cv.csv``.
 """
 
@@ -30,7 +31,7 @@ import numpy as np
 import pandas as pd
 from sklearn.datasets import fetch_openml
 from sklearn.metrics import log_loss, roc_auc_score
-from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
+from sklearn.model_selection import StratifiedKFold
 
 from tabicl import TabICLClassifier
 
@@ -66,8 +67,8 @@ DATASET_ORDER = [
     "students_dropout_and_academic_success",
 ]
 
-# Do not start a fold whose predicted fit+predict time is longer than this.
-TIME_LIMIT_S = 15.0
+# Do not start a fold whose predicted fit+predict time is longer than a minute.
+TIME_LIMIT_S = 60.0
 
 # Mean fit+predict seconds at n_estimators=4 on this CPU, as (n_context, seconds).
 # Measured in the previous 5-fold run and used to decide which large-task
@@ -121,14 +122,6 @@ def _load_task(name: str):
     frame, y = fetch_openml(data_id=data_id, as_frame=True, return_X_y=True, parser="auto")
     y = pd.Series(np.asarray(y), name="target").reset_index(drop=True)
     return frame.reset_index(drop=True), y
-
-
-def _stratified_take(X, y, n_samples: int, random_state: int):
-    if n_samples >= len(y):
-        return X, y
-    splitter = StratifiedShuffleSplit(n_splits=1, train_size=n_samples, random_state=random_state)
-    index, _ = next(splitter.split(np.zeros(len(y)), y))
-    return X.iloc[index].reset_index(drop=True), y.iloc[index].reset_index(drop=True)
 
 
 def _already_ran(results: pd.DataFrame, row: dict) -> bool:
@@ -472,9 +465,7 @@ def _strategy_figure(summary, score, *, maximize, title, ylabel, path):
 
 
 def _fit_one(strategy, ratio, X_train, y_train, X_test, n_estimators, seed):
-    """Fit one fold. Uniform draws are size-matched to the class-aware cap."""
-    import tabicl._sklearn.classifier as classifier_module
-
+    """Fit one fold. Uniform draws use ``subsample`` at the class-aware size."""
     reference_classes = np.unique(np.asarray(y_train))
     common = dict(
         n_estimators=n_estimators,
@@ -486,51 +477,16 @@ def _fit_one(strategy, ratio, X_train, y_train, X_test, n_estimators, seed):
         verbose=False,
     )
     n_context = _context_size(y_train, ratio)
-    original = classifier_module.majority_undersample_index_sets
-    if strategy == "uniform" and ratio is not None and n_context < len(y_train):
-
-        def uniform_sets(y, max_imbalance_ratio, n_sets, random_state):
-            y = np.asarray(y)
-            n_classes = int(y.max()) + 1
-            class_counts = np.bincount(y, minlength=n_classes).astype(np.int64, copy=False)
-            class_rows = [np.flatnonzero(y == class_id) for class_id in range(n_classes)]
-            rng = np.random.RandomState(random_state)
-            index_sets = []
-            for _ in range(n_sets):
-                chosen = None
-                for _attempt in range(10000):
-                    candidate = rng.choice(len(y), size=n_context, replace=False)
-                    if np.array_equal(np.unique(y[candidate]), np.arange(n_classes)):
-                        chosen = candidate
-                        break
-                if chosen is None:
-                    # Keep the requested size and force one row of each class.
-                    chosen = rng.choice(len(y), size=n_context, replace=False)
-                    present = set(np.unique(y[chosen]).tolist())
-                    for class_id in range(n_classes):
-                        if class_id in present:
-                            continue
-                        replace_at = int(np.flatnonzero(y[chosen] != class_id)[0])
-                        chosen[replace_at] = int(rng.choice(class_rows[class_id]))
-                        present.add(class_id)
-                chosen = np.asarray(chosen, dtype=np.int64)
-                chosen.sort()
-                index_sets.append(chosen)
-            # Keep the original prior so the Elkan map is not applied. Uniform
-            # draws are not a class-conditional subsample.
-            return index_sets, class_counts, class_counts.copy()
-
-        classifier_module.majority_undersample_index_sets = uniform_sets
-    try:
+    if strategy == "uniform":
+        clf = TabICLClassifier(subsample=n_context, max_imbalance_ratio=None, **common)
+    else:
         clf = TabICLClassifier(max_imbalance_ratio=ratio, **common)
-        t0 = time.perf_counter()
-        clf.fit(X_train, y_train)
-        fit_seconds = time.perf_counter() - t0
-        t1 = time.perf_counter()
-        proba = clf.predict_proba(X_test)
-        predict_seconds = time.perf_counter() - t1
-    finally:
-        classifier_module.majority_undersample_index_sets = original
+    t0 = time.perf_counter()
+    clf.fit(X_train, y_train)
+    fit_seconds = time.perf_counter() - t0
+    t1 = time.perf_counter()
+    proba = clf.predict_proba(X_test)
+    predict_seconds = time.perf_counter() - t1
     proba = _align_proba(proba, clf.classes_, reference_classes)
     if clf.context_indices_ is None:
         context_rows = len(y_train)
@@ -632,14 +588,6 @@ def run(args) -> None:
             f"counts={sorted(counts.tolist(), reverse=True)} ratio={counts.max() / counts.min():.2f}",
             flush=True,
         )
-        if args.max_rows is not None and len(y) > args.max_rows:
-            X, y = _stratified_take(X, y, args.max_rows, args.seed)
-            counts = _class_counts(y)
-            print(
-                f"stratified cap to n={len(y)} counts={sorted(counts.tolist(), reverse=True)} "
-                f"ratio={counts.max() / counts.min():.2f}",
-                flush=True,
-            )
         if counts.min() < args.n_splits:
             print(
                 f"skip: rarest class has {int(counts.min())} rows, fewer than n_splits={args.n_splits}",
@@ -666,7 +614,7 @@ def run(args) -> None:
                             "max_imbalance_ratio": label,
                             "n_estimators": int(n_estimators),
                             "n_splits": int(args.n_splits),
-                            "max_rows": int(args.max_rows) if args.max_rows is not None else -1,
+                            "max_rows": -1,
                             "seed": int(args.seed),
                         }
                         if _already_ran(results, row_key):
@@ -832,12 +780,6 @@ def main() -> None:
     )
     parser.add_argument("--n-estimators", nargs="+", type=int, default=[1, 4, 8])
     parser.add_argument("--n-splits", type=int, default=5)
-    parser.add_argument(
-        "--max-rows",
-        type=int,
-        default=12000,
-        help="Stratified cap applied before CV. Datasets at or below this size are used in full.",
-    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", default=str(Path(__file__).resolve().parent))
     run(parser.parse_args())

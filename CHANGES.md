@@ -4,11 +4,17 @@
 New features
 ------------
 
-- ``TabICLClassifier`` accepts ``max_imbalance_ratio`` (default ``None``). A finite
-  value undersamples majority classes in the in-context training set whenever
-  the majority-to-minority count ratio exceeds it, then applies a multiclass
-  Elkan correction so ``predict_proba`` stays calibrated to the class prior of
-  the original ``y``. The default disables undersampling. Kept rows are stored
+- ``TabICLClassifier`` accepts ``max_imbalance_ratio`` (default ``None``) and
+  ``subsample`` (default ``None``). A finite ratio undersamples majority classes
+  in the in-context training set whenever the majority-to-minority count ratio
+  exceeds it, then applies a multiclass Elkan correction so ``predict_proba``
+  stays calibrated to the class prior of the original ``y``. ``subsample`` is
+  the fixed row budget of ``BaggingClassifier(max_samples=...)``: ``None`` does
+  not impose one, an int is a row count, and a float in ``(0, 1]`` is a fraction
+  of the training rows. Draws are without replacement. With a ratio set, the
+  budget is drawn classwise and every member shares class counts. Without a
+  ratio, the budget is drawn uniformly and the Elkan correction is not applied.
+  The default of both parameters disables subsampling. Kept rows are stored
   in their original order for a stable index set; attention over rows is
   permutation-equivariant when each row stays tied to its label. The correction
   is the prior-shift map of Saerens et al. (2002) and reduces to Theorem 2 of

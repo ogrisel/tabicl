@@ -14,6 +14,7 @@ import pytest
 from numpy.testing import assert_allclose
 
 from tabicl._sklearn.prevalence import (
+    context_index_sets,
     correct_class_prior,
     majority_undersample_index_sets,
     majority_undersample_indices,
@@ -175,6 +176,84 @@ def test_independent_index_sets_share_counts_and_differ():
     assert np.array_equal(one, sets[0])
 
 
+def test_uniform_subsample_matches_the_requested_size_and_skips_elkan_counts():
+    y = np.array([0] * 100 + [1] * 8)
+    sets, counts, context_counts = context_index_sets(
+        y, subsample=24, max_imbalance_ratio=None, n_sets=3, random_state=0
+    )
+    assert counts.tolist() == [100, 8]
+    # Uniform members do not share a prior, so the correction is left off.
+    assert context_counts.tolist() == [100, 8]
+    assert len(sets) == 3
+    for indices in sets:
+        assert len(indices) == 24
+        assert np.all(np.diff(indices) > 0)
+        assert set(np.unique(y[indices]).tolist()) == {0, 1}
+    assert not np.array_equal(sets[0], sets[1])
+
+
+def test_float_subsample_is_a_fraction_of_the_rows():
+    y = np.array([0] * 40 + [1] * 10)
+    sets, _, _ = context_index_sets(y, subsample=0.5, max_imbalance_ratio=None, n_sets=1, random_state=0)
+    assert len(sets[0]) == 25
+
+
+def test_classwise_subsample_respects_the_ratio_and_the_budget():
+    y = np.array([0] * 100 + [1] * 8)
+    sets, counts, context_counts = context_index_sets(
+        y, subsample=20, max_imbalance_ratio=5, n_sets=2, random_state=0
+    )
+    assert counts.tolist() == [100, 8]
+    assert context_counts.sum() <= 20
+    assert context_counts.min() >= 1
+    assert context_counts.max() / context_counts.min() <= 5
+    assert len(sets) == 2
+    for indices in sets:
+        assert np.bincount(y[indices], minlength=2).tolist() == context_counts.tolist()
+        assert np.all(np.diff(indices) > 0)
+    assert not np.array_equal(sets[0], sets[1])
+
+
+def test_subsample_does_not_put_majority_rows_back_past_the_ratio():
+    y = np.array([0] * 100 + [1] * 8)
+    sets, _, context_counts = context_index_sets(
+        y, subsample=80, max_imbalance_ratio=5, n_sets=1, random_state=0
+    )
+    # cap = floor(5 * 8) = 40, so the context is 48 rows, not 80.
+    assert context_counts.tolist() == [40, 8]
+    assert len(sets[0]) == 48
+
+
+def test_subsample_none_matches_the_ratio_only_draw():
+    y = np.array([0] * 100 + [1] * 8)
+    capped, _, capped_counts = context_index_sets(
+        y, subsample=None, max_imbalance_ratio=5, n_sets=1, random_state=0
+    )
+    legacy, _, legacy_counts = majority_undersample_indices(y, max_imbalance_ratio=5, random_state=0)
+    assert np.array_equal(capped[0], legacy)
+    assert np.array_equal(capped_counts, legacy_counts)
+
+    untouched, _, untouched_counts = context_index_sets(
+        y, subsample=None, max_imbalance_ratio=None, n_sets=1, random_state=0
+    )
+    assert untouched is None
+    assert untouched_counts.tolist() == [100, 8]
+
+
+def test_subsample_rejects_bad_values():
+    y = np.array([0] * 10 + [1] * 4)
+    with pytest.raises(ValueError):
+        context_index_sets(y, subsample=0, max_imbalance_ratio=None, n_sets=1, random_state=0)
+    with pytest.raises(ValueError):
+        context_index_sets(y, subsample=1.5, max_imbalance_ratio=None, n_sets=1, random_state=0)
+    with pytest.raises(ValueError):
+        context_index_sets(y, subsample=True, max_imbalance_ratio=None, n_sets=1, random_state=0)
+    with pytest.raises(ValueError):
+        context_index_sets(y, subsample=50, max_imbalance_ratio=None, n_sets=1, random_state=0)
+    with pytest.raises(ValueError):
+        context_index_sets(y, subsample=1, max_imbalance_ratio=5, n_sets=1, random_state=0)
+
+
 def test_undersample_rejects_ratio_below_one():
     y = np.array([0, 0, 1])
     with pytest.raises(ValueError):
@@ -304,3 +383,29 @@ def test_classifier_imbalance_ratio_is_a_noop_below_the_cap():
     assert capped.context_indices_ is None
     assert np.array_equal(capped.class_counts_, capped.context_class_counts_)
     assert_allclose(capped.predict_proba(x[60:]), disabled.predict_proba(x[60:]), rtol=1e-6, atol=1e-6)
+
+
+def test_classifier_subsample_is_uniform_or_classwise():
+    from tabicl import TabICLClassifier
+
+    rng = np.random.RandomState(0)
+    y_train = np.concatenate([np.full(80, 0), np.full(8, 1)])
+    x_train = rng.normal(size=(len(y_train), 4))
+    x_test = rng.normal(size=(6, 4))
+    uniform = TabICLClassifier(subsample=20, max_imbalance_ratio=None, **_classifier_kwargs()).fit(x_train, y_train)
+    # Ratio 1 caps the majority at the 8 minority rows, so the budget of 20
+    # cannot add those majority rows back.
+    classwise = TabICLClassifier(subsample=20, max_imbalance_ratio=1, **_classifier_kwargs()).fit(x_train, y_train)
+
+    assert len(uniform.context_indices_[0]) == 20
+    assert np.array_equal(uniform.context_class_counts_, uniform.class_counts_)
+    assert set(np.unique(y_train[uniform.context_indices_[0]]).tolist()) == {0, 1}
+
+    assert classwise.context_class_counts_.tolist() == [8, 8]
+    assert len(classwise.context_indices_[0]) == 16
+    assert np.bincount(y_train[classwise.context_indices_[0]], minlength=2).tolist() == [8, 8]
+
+    for model in (uniform, classwise):
+        proba = model.predict_proba(x_test)
+        assert proba.shape == (len(x_test), 2)
+        assert_allclose(proba.sum(axis=1), 1.0, atol=1e-5)

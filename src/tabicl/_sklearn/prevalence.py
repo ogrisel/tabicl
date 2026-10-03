@@ -50,6 +50,8 @@ calibrated to :math:`\\pi'`.
 
 from __future__ import annotations
 
+from numbers import Integral, Real
+
 import numpy as np
 from sklearn.utils import check_random_state
 
@@ -141,6 +143,226 @@ def _validate_max_imbalance_ratio(max_imbalance_ratio: float | None) -> float | 
     if not np.isfinite(ratio_limit) or ratio_limit < 1.0:
         raise ValueError(f"max_imbalance_ratio must be >= 1, inf, or None; got {max_imbalance_ratio!r}.")
     return ratio_limit
+
+
+def _validate_subsample(subsample) -> None:
+    """Reject a ``subsample`` value that is not ``None``, a positive int, or a fraction."""
+    if subsample is None:
+        return
+    if isinstance(subsample, bool) or not isinstance(subsample, Real):
+        raise ValueError(
+            "subsample must be None, a positive int, or a float in (0, 1]; "
+            f"got {subsample!r}."
+        )
+    if isinstance(subsample, Integral):
+        if int(subsample) < 1:
+            raise ValueError(f"subsample must be at least 1; got {subsample!r}.")
+        return
+    value = float(subsample)
+    if not np.isfinite(value) or not (0.0 < value <= 1.0):
+        raise ValueError(f"float subsample must be in (0, 1]; got {subsample!r}.")
+
+
+def _subsample_count(subsample, n_samples: int) -> int | None:
+    """Row budget, or ``None`` when ``subsample`` does not limit the context.
+
+    ``None`` keeps every row. An integer is a row count and cannot exceed
+    ``n_samples``. A float is the fraction of ``n_samples`` used by
+    ``BaggingClassifier(max_samples=...)``, truncated with ``int`` and raised
+    to at least 1.
+    """
+    _validate_subsample(subsample)
+    if subsample is None:
+        return None
+    if isinstance(subsample, Integral):
+        count = int(subsample)
+        if count > n_samples:
+            raise ValueError(f"subsample={count} is greater than n_samples={n_samples}.")
+        return count
+    return max(int(float(subsample) * n_samples), 1)
+
+
+def _largest_remainder(upper: np.ndarray, n_target: int) -> np.ndarray:
+    """Spread ``n_target`` rows across classes in proportion to ``upper``."""
+    upper = np.asarray(upper, dtype=np.int64)
+    n_classes = int(upper.shape[0])
+    if n_target < n_classes:
+        raise ValueError(
+            f"subsample keeps {n_target} rows but there are {n_classes} classes. "
+            "Each class needs at least one row."
+        )
+    if n_target >= int(upper.sum()):
+        return upper.copy()
+    weights = upper.astype(np.float64)
+    raw = weights / weights.sum() * n_target
+    alloc = np.minimum(np.maximum(np.floor(raw).astype(np.int64), 1), upper)
+    while int(alloc.sum()) > n_target:
+        surplus = alloc.astype(np.float64) - raw
+        candidates = np.flatnonzero(alloc > 1)
+        if len(candidates) == 0:
+            break
+        idx = int(candidates[np.argmax(surplus[candidates])])
+        alloc[idx] -= 1
+    leftover = n_target - int(alloc.sum())
+    fractional = raw - np.floor(raw)
+    for idx in np.argsort(-fractional):
+        if leftover <= 0:
+            break
+        if alloc[idx] >= upper[idx]:
+            continue
+        alloc[idx] += 1
+        leftover -= 1
+    if leftover > 0:
+        for idx in np.argsort(-(upper - alloc)):
+            room = int(upper[idx] - alloc[idx])
+            take = min(room, leftover)
+            alloc[idx] += take
+            leftover -= take
+            if leftover <= 0:
+                break
+    return alloc
+
+
+def _repair_ratio(alloc: np.ndarray, ratio_limit: float, upper: np.ndarray) -> np.ndarray:
+    """Move or drop majority rows until ``max(alloc) / min(alloc)`` is within the cap."""
+    alloc = np.asarray(alloc, dtype=np.int64).copy()
+    upper = np.asarray(upper, dtype=np.int64)
+    for _ in range(int(alloc.sum()) + 1):
+        minority = int(alloc.min())
+        cap = max(int(np.floor(ratio_limit * float(minority) + 1e-8)), 1)
+        if int(alloc.max()) <= cap:
+            return alloc
+        largest = int(np.argmax(alloc))
+        smallest = int(np.argmin(alloc))
+        alloc[largest] -= 1
+        if alloc[smallest] < upper[smallest]:
+            alloc[smallest] += 1
+    return alloc
+
+
+def _class_quotas(class_counts: np.ndarray, ratio_limit: float | None, n_target: int | None) -> np.ndarray:
+    """Per-class row budget shared by every ensemble member."""
+    if ratio_limit is None:
+        upper = np.asarray(class_counts, dtype=np.int64).copy()
+    else:
+        cap = max(int(np.floor(float(ratio_limit) * float(class_counts.min()) + 1e-8)), 1)
+        upper = np.minimum(np.asarray(class_counts, dtype=np.int64), cap)
+    if n_target is None or n_target >= int(upper.sum()):
+        return upper
+    alloc = _largest_remainder(upper, n_target)
+    if ratio_limit is None:
+        return alloc
+    return _repair_ratio(alloc, ratio_limit, upper)
+
+
+def _draw_quotas(class_rows: list[np.ndarray], quotas: np.ndarray, n_sets: int, rng) -> list[np.ndarray]:
+    """Independent without-replacement draws that all realize ``quotas``."""
+    index_sets = []
+    for _ in range(n_sets):
+        kept = []
+        for rows, quota in zip(class_rows, quotas):
+            quota = int(quota)
+            chosen = rows if quota == len(rows) else rng.choice(rows, size=quota, replace=False)
+            kept.append(np.asarray(chosen, dtype=np.int64).reshape(-1))
+        indices = np.concatenate(kept)
+        indices.sort()
+        index_sets.append(indices)
+    return index_sets
+
+
+def _uniform_index_sets(y: np.ndarray, class_rows: list[np.ndarray], n_target: int, n_sets: int, rng) -> list[np.ndarray]:
+    """Uniform draws of ``n_target`` rows that still contain every class."""
+    n_classes = len(class_rows)
+    if n_target < n_classes:
+        raise ValueError(
+            f"subsample keeps {n_target} rows but there are {n_classes} classes. "
+            "Each class needs at least one row."
+        )
+    n_samples = int(y.shape[0])
+    index_sets = []
+    for _ in range(n_sets):
+        chosen = None
+        for _attempt in range(10000):
+            candidate = rng.choice(n_samples, size=n_target, replace=False)
+            if len(np.unique(y[candidate])) == n_classes:
+                chosen = candidate
+                break
+        if chosen is None:
+            chosen = rng.choice(n_samples, size=n_target, replace=False)
+            present = set(np.unique(y[chosen]).tolist())
+            for class_id, rows in enumerate(class_rows):
+                if class_id in present:
+                    continue
+                member_counts = np.bincount(y[chosen], minlength=n_classes)
+                donors = np.flatnonzero(member_counts[y[chosen]] > 1)
+                if len(donors) == 0:
+                    donors = np.flatnonzero(y[chosen] != class_id)
+                chosen[int(donors[0])] = int(rng.choice(rows))
+                present.add(class_id)
+        chosen = np.asarray(chosen, dtype=np.int64)
+        chosen.sort()
+        index_sets.append(chosen)
+    return index_sets
+
+
+def context_index_sets(
+    y: np.ndarray,
+    subsample,
+    max_imbalance_ratio: float | None,
+    n_sets: int,
+    random_state,
+) -> tuple[list[np.ndarray] | None, np.ndarray, np.ndarray]:
+    """Per-member context indices for ``subsample`` and ``max_imbalance_ratio``.
+
+    ``subsample`` is the fixed row budget used by ``BaggingClassifier``'s
+    ``max_samples``: ``None`` does not impose one, an int is a row count, and
+    a float is a fraction of ``len(y)``. Draws are without replacement.
+
+    When ``max_imbalance_ratio`` is ``None``, a finite budget is drawn
+    uniformly and the Elkan correction is not applied. Members then do not
+    share class counts, so the returned context counts equal the original
+    class counts and the caller leaves probabilities unchanged.
+
+    When ``max_imbalance_ratio`` is set, the same budget is drawn classwise.
+    Majority classes are capped, the remaining rows are spread in proportion
+    to those caps, and every member uses that same count vector. The Elkan
+    correction therefore has one source prior. A budget larger than the
+    capped context does not add majority rows back.
+    """
+    if n_sets < 1:
+        raise ValueError(f"n_sets must be at least 1, got {n_sets}.")
+    y = np.asarray(y)
+    if y.ndim != 1:
+        raise ValueError(f"y must be one-dimensional, got shape {y.shape}.")
+    if y.size == 0:
+        raise ValueError("y must contain at least one sample.")
+    if y.min() < 0:
+        raise ValueError("y must contain non-negative integer class ids.")
+
+    n_classes = int(y.max()) + 1
+    class_counts = np.bincount(y, minlength=n_classes).astype(np.int64, copy=False)
+    if np.any(class_counts == 0):
+        raise ValueError("y is missing a class id between 0 and max(y). Encode labels first.")
+
+    n_target = _subsample_count(subsample, int(y.shape[0]))
+    ratio_limit = _validate_max_imbalance_ratio(max_imbalance_ratio)
+    if n_target is None or n_target >= int(y.shape[0]):
+        if ratio_limit is None:
+            return None, class_counts, class_counts.copy()
+        return majority_undersample_index_sets(y, ratio_limit, n_sets, random_state)
+
+    class_rows = [np.flatnonzero(y == class_id) for class_id in range(n_classes)]
+    rng = check_random_state(random_state)
+    if ratio_limit is None:
+        index_sets = _uniform_index_sets(y, class_rows, n_target, n_sets, rng)
+        # Members do not share a class prior, so the post-hoc map is skipped.
+        return index_sets, class_counts, class_counts.copy()
+
+    quotas = _class_quotas(class_counts, ratio_limit, n_target)
+    if np.array_equal(quotas, class_counts):
+        return None, class_counts, class_counts.copy()
+    index_sets = _draw_quotas(class_rows, quotas, n_sets, rng)
+    return index_sets, class_counts, quotas.astype(np.int64, copy=False)
 
 
 def majority_undersample_index_sets(
