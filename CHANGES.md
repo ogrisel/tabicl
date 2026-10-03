@@ -13,8 +13,9 @@ New features
   permutation-equivariant when each row stays tied to its label. The correction
   is the prior-shift map of Saerens et al. (2002) and reduces to Theorem 2 of
   Elkan (IJCAI 2001) for two classes. On the skewed TabArena tasks in
-  ``benchmarks/max_imbalance_ratio``, 20 was the smallest cap whose 5-fold
-  ROC-AUC stayed within one standard deviation of the uncapped run. Each
+  ``benchmarks/max_imbalance_ratio``, cap 20 kept 5-fold ROC-AUC and
+  log-loss within one standard deviation of the uncapped run
+  (``n_estimators=4``). Each
   ensemble member draws its own majority subsample. The Elkan correction is
   applied once, after members are averaged and, when averaging logits, after
   the softmax.

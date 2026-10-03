@@ -24,11 +24,11 @@ normalizer depends on the features, so one-vs-rest AUC can move as well.
 
 ## ROC-AUC
 
-![ROC-AUC, 5-fold mean ± 1 std](pareto_member_roc_auc.png)
+![ROC-AUC, 5-fold mean ± 1 std](pareto_roc_auc.png)
 
 ## Log-loss
 
-![Log-loss, 5-fold mean ± 1 std](pareto_member_log_loss.png)
+![Log-loss, 5-fold mean ± 1 std](pareto_log_loss.png)
 
 ## Paired comparison with the full context
 

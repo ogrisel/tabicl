@@ -12,7 +12,8 @@ Examples
 
     python benchmarks/max_imbalance_ratio/run_experiment.py \\
         --datasets seismic-bumps anneal MIC \\
-        --ratios 1 3 5 10 15 20 30 none \\
+        --ratios 1 5 20 none \\
+        --n-estimators 4 \\
         --n-splits 5
 
 Completed folds are appended to ``results_cv.csv`` and skipped on a rerun.
@@ -387,9 +388,9 @@ def main() -> None:
     parser.add_argument(
         "--ratios",
         nargs="+",
-        default=["1", "3", "5", "10", "15", "20", "30", "none"],
+        default=["1", "5", "20", "none"],
     )
-    parser.add_argument("--n-estimators", type=int, default=1)
+    parser.add_argument("--n-estimators", type=int, default=4)
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument(
         "--max-rows",
