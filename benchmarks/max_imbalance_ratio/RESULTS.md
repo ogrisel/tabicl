@@ -10,7 +10,7 @@ to 12,000 rows before the split; every other task is used in full. Caps are
 Points are fold means. Horizontal bars are the standard deviation of
 fit+predict time, vertical bars the standard deviation of the metric. The
 orange line is the Pareto front of the means. Fold-level rows are in
-`results_member_cv.csv`; means are in `results_member_cv_summary.csv`.
+`results_cv.csv`; means are in `results_cv_summary.csv`.
 
 A cap at or above the training fold's natural ratio does not drop rows.
 ROC-AUC and log-loss then match the uncapped run on every fold (seismic-bumps,
