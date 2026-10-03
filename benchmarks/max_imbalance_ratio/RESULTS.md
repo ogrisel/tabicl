@@ -10,8 +10,9 @@ None}`. The same folds are reused for every cap.
 Points are fold means. Horizontal bars are the standard deviation of
 fit+predict time, vertical bars the standard deviation of the metric. The
 orange line is the Pareto front of the means. Fold-level rows are in
-`results_cv.csv`; means are in `results_cv_summary.csv`. `results.csv` is an
-earlier single-split sweep and is not used in the figures below.
+`results_cv.csv`; means are in `results_cv_summary.csv`. With one estimator
+there is a single majority subsample. The four-estimator run is in
+`MEMBER_RESULTS.md`.
 
 A cap at or above the training fold's natural ratio does not drop rows.
 ROC-AUC and log-loss then match the uncapped run on every fold (seismic-bumps,
