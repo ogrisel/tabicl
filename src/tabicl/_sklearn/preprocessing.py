@@ -1023,7 +1023,7 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
         self.outlier_threshold = outlier_threshold
         self.random_state = random_state
 
-    def fit(self, X, y):
+    def fit(self, X, y, row_indices=None):
         """Create ensemble configurations and fit preprocessing pipelines.
 
         This method:
@@ -1039,6 +1039,12 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
 
         y : array-like of shape (n_samples,)
             Training target values.
+
+        row_indices : list of ndarray or None, default=None
+            Optional per-member training-row positions into ``X`` / ``y``,
+            aligned with the ensemble members in generation order. ``None``
+            uses every row for every member. When provided, each member's
+            normalizer is fit only on its own rows.
 
         Returns
         -------
@@ -1073,17 +1079,54 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
         if self.classification:
             self.class_shuffles_ = y_patterns
 
-        # Fit preprocessing pipelines
-        self.preprocessors_ = {}
-        for norm_method in self.ensemble_configs_:
-            if norm_method not in self.preprocessors_:
-                preprocessor = PreprocessingPipeline(
-                    normalization_method=norm_method,
-                    outlier_threshold=self.outlier_threshold,
-                    random_state=self.random_state,
+        n_members = sum(len(configs) for configs in self.ensemble_configs_.values())
+        self.row_indices_ = None
+        self.member_preprocessors_ = None
+        if row_indices is not None:
+            if len(row_indices) < n_members:
+                raise ValueError(
+                    f"Expected at least {n_members} row-index sets, got {len(row_indices)}."
                 )
-                preprocessor.fit(X)
-                self.preprocessors_[norm_method] = preprocessor
+            # Members are grouped by normalization method in the same order as
+            # ensemble_configs_. Assign index sets in that grouped order.
+            assigned = []
+            cursor = 0
+            self.row_indices_ = OrderedDict()
+            for method, configs in self.ensemble_configs_.items():
+                member_indices = [np.asarray(row_indices[cursor + i], dtype=np.int64) for i in range(len(configs))]
+                cursor += len(configs)
+                self.row_indices_[method] = member_indices
+                assigned.extend(member_indices)
+            if len({idx.shape[0] for idx in assigned}) != 1:
+                raise ValueError("Per-member row subsets must all have the same length.")
+
+        # Fit preprocessing pipelines. Shared across members unless each member
+        # has its own training rows, in which case each normalizer sees only
+        # that member's context.
+        self.preprocessors_ = {}
+        if self.row_indices_ is None:
+            for norm_method in self.ensemble_configs_:
+                if norm_method not in self.preprocessors_:
+                    preprocessor = PreprocessingPipeline(
+                        normalization_method=norm_method,
+                        outlier_threshold=self.outlier_threshold,
+                        random_state=self.random_state,
+                    )
+                    preprocessor.fit(X)
+                    self.preprocessors_[norm_method] = preprocessor
+        else:
+            self.member_preprocessors_ = OrderedDict()
+            for norm_method, member_indices in self.row_indices_.items():
+                pipes = []
+                for idx in member_indices:
+                    preprocessor = PreprocessingPipeline(
+                        normalization_method=norm_method,
+                        outlier_threshold=self.outlier_threshold,
+                        random_state=self.random_state,
+                    )
+                    preprocessor.fit(X[idx])
+                    pipes.append(preprocessor)
+                self.member_preprocessors_[norm_method] = pipes
 
         return self
 
@@ -1172,18 +1215,16 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
         assert mode in ("both", "train", "test"), f"Invalid mode: {mode}"
 
         if mode == "train":
-            y = self.y_
             data = OrderedDict()
-            for norm_method, shuffle_configs in self.ensemble_configs_.items():
-                X_preprocessed = self.preprocessors_[norm_method].X_transformed_
+            for norm_method, bundles in self._member_bundles().items():
                 X_ensemble = []
                 y_ensemble = []
-                for feat_shuffle, y_pattern in shuffle_configs:
-                    X_ensemble.append(X_preprocessed[:, feat_shuffle])
+                for preprocessor, y_member, feat_shuffle, y_pattern in bundles:
+                    X_ensemble.append(preprocessor.X_transformed_[:, feat_shuffle])
                     if self.classification:
-                        y_ensemble.append(np.array(y_pattern)[y.astype(int)])
+                        y_ensemble.append(np.array(y_pattern)[y_member.astype(int)])
                     else:
-                        y_ensemble.append(y)
+                        y_ensemble.append(y_member)
                 data[norm_method] = (np.stack(X_ensemble, axis=0), np.stack(y_ensemble, axis=0))
             return data
 
@@ -1191,35 +1232,66 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
         assert X is not None, "X is required when mode is 'test' or 'both'"
         X = self.unique_filter_.transform(X)
 
+        # Members that share a fitted preprocessor must not transform X twice.
+        transformed_test = {}
+
+        def _test_view(preprocessor):
+            key = id(preprocessor)
+            if key not in transformed_test:
+                transformed_test[key] = preprocessor.transform(X)
+            return transformed_test[key]
+
         if mode == "test":
             data = OrderedDict()
-            for norm_method, shuffle_configs in self.ensemble_configs_.items():
-                X_test_preprocessed = self.preprocessors_[norm_method].transform(X)
+            for norm_method, bundles in self._member_bundles().items():
                 X_ensemble = []
-                for feat_shuffle, _ in shuffle_configs:
-                    X_ensemble.append(X_test_preprocessed[:, feat_shuffle])
+                for preprocessor, _y_member, feat_shuffle, _y_pattern in bundles:
+                    X_ensemble.append(_test_view(preprocessor)[:, feat_shuffle])
                 data[norm_method] = (np.stack(X_ensemble, axis=0),)
             return data
 
         # mode == "both"
-        y = self.y_
         data = OrderedDict()
-        for norm_method, shuffle_configs in self.ensemble_configs_.items():
-            preprocessor = self.preprocessors_[norm_method]
-            X_train_pp = preprocessor.X_transformed_
-            X_test_pp = preprocessor.transform(X)
-            X_variant = np.concatenate([X_train_pp, X_test_pp], axis=0)
+        for norm_method, bundles in self._member_bundles().items():
             X_ensemble = []
             y_ensemble = []
-            for feat_shuffle, y_pattern in shuffle_configs:
+            for preprocessor, y_member, feat_shuffle, y_pattern in bundles:
+                X_train_pp = preprocessor.X_transformed_
+                X_variant = np.concatenate([X_train_pp, _test_view(preprocessor)], axis=0)
                 X_ensemble.append(X_variant[:, feat_shuffle])
 
                 if self.classification:
                     # Apply class shuffle for classification
-                    y_ensemble.append(np.array(y_pattern)[y.astype(int)])
+                    y_ensemble.append(np.array(y_pattern)[y_member.astype(int)])
                 else:
-                    y_ensemble.append(y)
+                    y_ensemble.append(y_member)
 
             data[norm_method] = (np.stack(X_ensemble, axis=0), np.stack(y_ensemble, axis=0))
 
         return data
+
+    def _member_bundles(self):
+        """Per-member ``(preprocessor, training labels, feature shuffle, class shuffle)``.
+
+        When every member sees the same rows, members that share a
+        normalization method also share one fitted preprocessor.
+        """
+        bundles = OrderedDict()
+        for norm_method, shuffle_configs in self.ensemble_configs_.items():
+            if self.row_indices_ is None:
+                preprocessor = self.preprocessors_[norm_method]
+                y_member = self.y_
+                bundles[norm_method] = [
+                    (preprocessor, y_member, feat_shuffle, y_pattern)
+                    for feat_shuffle, y_pattern in shuffle_configs
+                ]
+            else:
+                bundles[norm_method] = [
+                    (preprocessor, self.y_[idx], feat_shuffle, y_pattern)
+                    for (feat_shuffle, y_pattern), idx, preprocessor in zip(
+                        shuffle_configs,
+                        self.row_indices_[norm_method],
+                        self.member_preprocessors_[norm_method],
+                    )
+                ]
+        return bundles

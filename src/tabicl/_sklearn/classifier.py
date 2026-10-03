@@ -19,6 +19,12 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 
 from .base import TabICLBaseEstimator
 from .preprocessing import TransformToNumerical, EnsembleGenerator
+from .prevalence import (
+    _validate_max_imbalance_ratio,
+    _validate_subsample,
+    context_index_sets,
+    correct_class_prior,
+)
 from .sklearn_utils import validate_data, _num_samples
 
 from tabicl import InferenceConfig
@@ -79,6 +85,52 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
     average_logits : bool, default=True
         Whether to average the logits (True) or probabilities (False) of ensemble members.
         Averaging logits often produces better calibrated probabilities.
+
+    max_imbalance_ratio : float or None, default=None
+        Largest majority-to-minority count ratio kept in the in-context
+        training set. When ``max(class count) / min(class count)`` in ``y``
+        exceeds this value, each ensemble member independently undersamples
+        majority classes (without replacement) so that member has at most
+        ``max_imbalance_ratio`` times as many rows as the rarest class.
+        Every member keeps the same class counts; the rows drawn from each
+        majority class differ. The kept rows of a member stay in their
+        original order. That order is not meaningful to the model: column
+        embedding and in-context attention are permutation-equivariant over
+        rows when each row stays tied to its label, and rotary positions run
+        across features within a row.
+        ``predict_proba`` averages the members first (averaging logits, then
+        applying softmax, when ``average_logits`` is True) and only then
+        applies one multiclass Elkan correction. That maps the ensembled
+        probabilities back to the class prior of the original ``y``.
+
+        If the natural ratio is already at most ``max_imbalance_ratio``,
+        the training rows are left unchanged and no correction is applied.
+        ``None`` (the default) and ``inf`` disable undersampling, which
+        leaves predictions identical to the full training context. Values
+        below 1 are invalid: dropping majority rows cannot make a class
+        rarer than the minority class.
+
+        The correction is the prior-shift adjustment of Saerens et al.
+        (2002), which reduces to Theorem 2 of Elkan (IJCAI 2001) for two
+        classes. It is valid because undersampling depends on the row only
+        through its label. See :mod:`tabicl._sklearn.prevalence`.
+
+    subsample : int, float, or None, default=None
+        Row budget for each ensemble member, with the same meaning as
+        ``BaggingClassifier(max_samples=...)``.
+
+        - ``None`` does not impose a fixed budget. ``max_imbalance_ratio``
+          may still drop majority-class rows.
+        - An int keeps that many rows, and must be between 1 and ``n_samples``.
+        - A float in ``(0, 1]`` keeps ``max(int(subsample * n_samples), 1)`` rows.
+
+        Draws are without replacement. When ``max_imbalance_ratio`` is
+        ``None``, the rows are drawn uniformly and no Elkan correction is
+        applied, because members do not share class counts. When
+        ``max_imbalance_ratio`` is set, the same budget is drawn classwise:
+        every member uses one shared count vector that respects the ratio,
+        and the Elkan correction runs once after the ensemble. A budget
+        larger than that capped context does not put majority rows back.
 
     support_many_classes : bool, default=True
         Whether to enable many-class support which performs mixed-radix ensembling during
@@ -238,7 +290,26 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         Number of features in the training data.
 
     n_samples_in_ : int
-        Number of samples in the training data.
+        Number of samples in the training data passed to ``fit`` (before
+        ``subsample`` or majority-class undersampling).
+
+    class_counts_ : ndarray of shape (n_classes,)
+        Number of training rows per class in ``y``, in ``classes_`` order.
+
+    context_class_counts_ : ndarray of shape (n_classes,)
+        Shared per-class row counts of the in-context examples, used as the
+        source prior of the Elkan correction. Equal to ``class_counts_``
+        when no correction is applied: the ratio cap does not bind, or the
+        subsample is uniform and members do not share class counts.
+
+    context_indices_ : list of ndarray or None
+        One increasing index array per ensemble member, into the training
+        matrix seen by the ensemble generator. Classwise draws share class
+        counts and differ in which majority rows they keep. Uniform draws
+        differ in both. ``None`` when no rows were dropped.
+
+    imbalance_ratio_ : float
+        ``max(class_counts_) / min(class_counts_)`` on the original ``y``.
 
     feature_names_in_ : ndarray of shape ``(n_features_in_,)`` or None
         Feature names seen during ``fit``. Only set when the input ``X`` has
@@ -288,6 +359,8 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         outlier_threshold: float = 4.0,
         softmax_temperature: float = 0.9,
         average_logits: bool = True,
+        max_imbalance_ratio: float | None = None,
+        subsample: int | float | None = None,
         support_many_classes: bool = True,
         batch_size: Optional[int] = 8,
         kv_cache: bool | str = False,
@@ -311,6 +384,8 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         self.outlier_threshold = outlier_threshold
         self.softmax_temperature = softmax_temperature
         self.average_logits = average_logits
+        self.max_imbalance_ratio = max_imbalance_ratio
+        self.subsample = subsample
         self.support_many_classes = support_many_classes
         self.batch_size = batch_size
         self.kv_cache = kv_cache
@@ -427,9 +502,12 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
 
         1. Encoding class labels using LabelEncoder
         2. Converting input features to numerical values
-        3. Fitting the ensemble generator to create transformed dataset views
-        4. Loading the pre-trained TabICL model
-        5. Optionally pre-computing KV caches for training data to speed up inference
+        3. Drawing one subsample per ensemble member when ``subsample`` or
+           ``max_imbalance_ratio`` drops rows. A ratio makes that draw classwise
+        4. Fitting the ensemble generator so each member is preprocessed on
+           its own subsample
+        5. Loading the pre-trained TabICL model
+        6. Optionally pre-computing KV caches for training data to speed up inference
            (controlled by the ``kv_cache`` init parameter)
 
         The model itself is not trained on the data; it uses in-context learning
@@ -452,11 +530,18 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         ------
         ValueError
             If the number of classes exceeds the model's maximum supported classes
-            and many-class support is disabled.
+            and many-class support is disabled, if ``max_imbalance_ratio`` is
+            not ``None``, ``inf``, or a finite number greater than or equal to 1,
+            or if ``subsample`` is not ``None``, a positive int, or a float in
+            ``(0, 1]``.
         """
 
         if y is None:
             raise ValueError("This classifier requires y to be passed, but the target y is None.")
+
+        # Reject a bad cap before loading the checkpoint.
+        _validate_max_imbalance_ratio(self.max_imbalance_ratio)
+        _validate_subsample(self.subsample)
 
         X, y = validate_data(self, X, y, dtype=None, skip_check_array=True)
         check_classification_targets(y)
@@ -503,6 +588,32 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         self.X_encoder_ = TransformToNumerical(verbose=self.verbose)
         X = self.X_encoder_.fit_transform(X)
 
+        # One independent subsample per ensemble member. The categorical
+        # encoder above is fit on the full table so unknown categories at
+        # predict time still map to the same codes. A classwise draw shares
+        # one count vector, and the Elkan correction is applied once after
+        # ensembling in predict_proba. A uniform draw does not.
+        context_indices, class_counts, context_counts = context_index_sets(
+            y,
+            self.subsample,
+            self.max_imbalance_ratio,
+            self.n_estimators,
+            self.random_state,
+        )
+        self.class_counts_ = class_counts
+        self.context_class_counts_ = context_counts
+        self.imbalance_ratio_ = float(class_counts.max() / class_counts.min())
+        self.context_indices_ = context_indices
+        if context_indices is not None and self.verbose:
+            kind = "uniformly" if self.max_imbalance_ratio is None else "classwise"
+            print(
+                f"Subsampled each ensemble member {kind} "
+                f"(subsample={self.subsample}, max_imbalance_ratio={self.max_imbalance_ratio}): "
+                f"counts {class_counts.tolist()} -> {context_counts.tolist()} "
+                f"({len(y)} -> {len(context_indices[0])} rows per member, "
+                f"{len(context_indices)} members)."
+            )
+
         # Fit ensemble generator to create multiple dataset views
         self.ensemble_generator_ = EnsembleGenerator(
             classification=True,
@@ -513,7 +624,14 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
             outlier_threshold=self.outlier_threshold,
             random_state=self.random_state,
         )
-        self.ensemble_generator_.fit(X, y)
+        self.ensemble_generator_.fit(X, y, row_indices=context_indices)
+        if context_indices is not None:
+            # Keep only the subsets that became ensemble members, in the
+            # order their predictions are averaged.
+            used = []
+            for member_indices in self.ensemble_generator_.row_indices_.values():
+                used.extend(member_indices)
+            self.context_indices_ = used
 
         self.model_kv_cache_ = None
         if self.kv_cache:
@@ -673,7 +791,11 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         2. Applies the ensemble generator to create multiple views
         3. Forwards each view through the model
         4. Corrects for class shuffles
-        5. Averages predictions across ensemble members
+        5. Averages predictions across ensemble members, and applies softmax to
+           the averaged logits when ``average_logits`` is True
+        6. Applies one multiclass Elkan correction to those ensembled
+           probabilities when majority classes were undersampled, so they
+           match the original class prior
 
         Parameters
         ----------
@@ -771,8 +893,30 @@ class TabICLClassifier(ClassifierMixin, TabICLBaseEstimator):
         if self.n_jobs is not None:
             torch.set_num_threads(old_n_threads)
 
-        # Normalize probabilities
-        return avg / avg.sum(axis=1, keepdims=True)
+        # Normalize probabilities, then undo the prior shift induced by
+        # majority undersampling. Equal counts mean the parameter was a no-op,
+        # in which case the values returned above are left untouched.
+        # Estimators pickled before this parameter existed have neither count
+        # vector; treat that as "no correction".
+        proba = avg / avg.sum(axis=1, keepdims=True)
+        class_counts = getattr(self, "class_counts_", None)
+        context_counts = getattr(self, "context_class_counts_", None)
+        if (
+            class_counts is None
+            or context_counts is None
+            or proba.shape[0] == 0
+            or np.array_equal(class_counts, context_counts)
+        ):
+            return proba
+        if proba.shape[1] != len(class_counts):
+            raise ValueError(
+                f"predict_proba returned {proba.shape[1]} columns but class_counts_ "
+                f"has length {len(class_counts)}. Refit the classifier."
+            )
+        corrected = correct_class_prior(proba, context_counts, class_counts)
+        proba = corrected.astype(proba.dtype, copy=False)
+        row_sum = proba.sum(axis=1, keepdims=True)
+        return proba / row_sum
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Predict class labels for test samples.
