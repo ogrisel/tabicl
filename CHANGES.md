@@ -12,10 +12,9 @@ New features
   in their original order for a stable index set; attention over rows is
   permutation-equivariant when each row stays tied to its label. The correction
   is the prior-shift map of Saerens et al. (2002) and reduces to Theorem 2 of
-  Elkan (IJCAI 2001) for two classes. On the skewed TabArena tasks in
-  ``benchmarks/max_imbalance_ratio``, cap 20 kept 5-fold ROC-AUC and
-  log-loss within one standard deviation of the uncapped run
-  (``n_estimators=4``). Each
+  Elkan (IJCAI 2001) for two classes. On the TabArena tasks where both
+  were measured at ``n_estimators=4``, cap 20 kept 5-fold ROC-AUC and
+  log-loss within one standard deviation of the uncapped run. Each
   ensemble member draws its own majority subsample. The Elkan correction is
   applied once, after members are averaged and, when averaging logits, after
   the softmax.

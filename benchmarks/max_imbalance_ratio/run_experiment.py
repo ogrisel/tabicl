@@ -9,9 +9,9 @@ Caps that do not change the training set are evaluated once and reused.
 ``{1, 3, 5, 10, 15, 20, 30, None}``. Completed folds are appended to
 ``results_cv.csv`` and skipped on a rerun.
 
-Fits expected to take more than two minutes are not started. The estimate
-scales the previous ``n_estimators=4`` timings on this machine by the
-observed cost of 1 and 8 members. Those skips are listed in
+Pending folds are run shortest prediction first. After each batch the
+prediction is rebuilt from the folds just measured. A fold is not started
+when that prediction is above 15 seconds. Skips are listed in
 ``skipped_cv.csv``.
 """
 
@@ -66,8 +66,8 @@ DATASET_ORDER = [
     "students_dropout_and_academic_success",
 ]
 
-# Skip a fit whose expected fit+predict time exceeds two minutes.
-TIME_LIMIT_S = 120.0
+# Do not start a fold whose predicted fit+predict time is longer than this.
+TIME_LIMIT_S = 15.0
 
 # Mean fit+predict seconds at n_estimators=4 on this CPU, as (n_context, seconds).
 # Measured in the previous 5-fold run and used to decide which large-task
@@ -177,35 +177,83 @@ def _interp_time(points: list[tuple[float, float]], n_context: float) -> float:
     return float(points[-1][1])
 
 
-def _n_est_scale(results: pd.DataFrame, dataset: str, n_estimators: int) -> float:
-    """Seconds at this ensemble size divided by the n_estimators=4 anchor."""
-    default = _N_EST_SCALE.get(int(n_estimators), (n_estimators / 4) ** 1.07)
+def _global_bias(results: pd.DataFrame) -> float:
+    """How much slower n_estimators=4 is than the anchor table. At least 1."""
+    if results.empty:
+        return 1.0
+    ratios = []
+    for dataset, anchors in _N4_ANCHORS.items():
+        block = results[(results["dataset"] == dataset) & (results["n_estimators"] == 4)]
+        if block.empty:
+            continue
+        for n_context, seconds in block.groupby("n_context")["fit_predict_seconds"].mean().items():
+            base = _interp_time(anchors, float(n_context))
+            if base > 0:
+                ratios.append(float(seconds) / base)
+    if not ratios:
+        return 1.0
+    return float(max(1.0, np.median(ratios)))
+
+
+def _dataset_bias(results: pd.DataFrame, dataset: str) -> float:
+    """n_estimators=4 slowdown on this task, else the slowdown on tasks already run."""
     anchors = _N4_ANCHORS.get(dataset)
     if anchors is None or results.empty:
-        return default
-    block = results[(results["dataset"] == dataset) & (results["n_estimators"] == n_estimators)]
-    if block.empty:
-        return default
+        return _global_bias(results)
+    block = results[(results["dataset"] == dataset) & (results["n_estimators"] == 4)]
     ratios = []
-    grouped = block.groupby("n_context")["fit_predict_seconds"].mean()
-    for n_context, seconds in grouped.items():
+    for n_context, seconds in block.groupby("n_context")["fit_predict_seconds"].mean().items():
         base = _interp_time(anchors, float(n_context))
         if base > 0:
             ratios.append(float(seconds) / base)
     if not ratios:
-        return default
-    # A larger measured ratio means this machine is slower than the anchor.
-    # A smaller one is usually the fixed overhead on a short context, so keep
-    # the default rather than under-predicting the long contexts.
-    return float(max(default, np.median(ratios)))
+        return _global_bias(results)
+    return float(max(1.0, np.median(ratios)))
+
+
+def _scale_bias(results: pd.DataFrame, dataset: str, n_estimators: int) -> float:
+    """Actual time divided by the anchor at this ensemble size.
+
+    One factor rescales the whole anchor curve. A local slope between two
+    nearly identical context lengths is not used: fold noise over a couple
+    of rows would otherwise predict multi-minute fits.
+    """
+    anchors = _N4_ANCHORS.get(dataset)
+    scale = _N_EST_SCALE.get(int(n_estimators), (n_estimators / 4) ** 1.07)
+    if anchors is None or results.empty:
+        return _dataset_bias(results, dataset)
+    block = results[(results["dataset"] == dataset) & (results["n_estimators"] == int(n_estimators))]
+    ratios = []
+    for n_context, seconds in block.groupby("n_context")["fit_predict_seconds"].mean().items():
+        base = _interp_time(anchors, float(n_context)) * scale
+        if base > 0:
+            ratios.append(float(seconds) / base)
+    if not ratios:
+        return _dataset_bias(results, dataset)
+    return float(np.clip(np.median(ratios), 0.5, 3.0))
 
 
 def _expected_seconds(results: pd.DataFrame, dataset: str, n_estimators: int, n_context: int) -> float | None:
-    """Predicted fit+predict seconds, or None when the task has no anchor."""
+    """Predicted fit+predict seconds from anchors, rescaled by folds already run."""
     anchors = _N4_ANCHORS.get(dataset)
     if anchors is None:
         return None
-    return _interp_time(anchors, float(n_context)) * _n_est_scale(results, dataset, n_estimators)
+    scale = _N_EST_SCALE.get(int(n_estimators), (n_estimators / 4) ** 1.07)
+    predicted = _interp_time(anchors, float(n_context)) * scale * _scale_bias(results, dataset, n_estimators)
+    if results.empty:
+        return float(predicted)
+    block = results[(results["dataset"] == dataset) & (results["n_estimators"] == int(n_estimators))]
+    if block.empty:
+        return float(predicted)
+    # A fold that already exceeded the limit condemns this context and anything larger.
+    slow = block[block["fit_predict_seconds"] > TIME_LIMIT_S]
+    if not slow.empty and float(n_context) >= float(slow["n_context"].min()) * 0.98:
+        return float(max(slow["fit_predict_seconds"].max(), predicted))
+    means = block.groupby("n_context")["fit_predict_seconds"].mean()
+    nearest = min(means.index, key=lambda ctx: abs(float(ctx) - n_context))
+    if abs(float(nearest) - n_context) <= max(10.0, 0.05 * float(n_context)):
+        return float(means.loc[nearest])
+    return float(predicted)
 
 
 def _align_proba(proba, model_classes, reference_classes):
@@ -491,6 +539,18 @@ def _fit_one(strategy, ratio, X_train, y_train, X_test, n_estimators, seed):
     return clf, proba, fit_seconds, predict_seconds, context_rows, reference_classes
 
 
+def _dataset_is_finished(results: pd.DataFrame, name: str, n_estimators: list[int], n_splits: int) -> bool:
+    """True when every ensemble size already has an uncapped class-aware run."""
+    if results.empty:
+        return False
+    block = results[
+        (results["dataset"] == name)
+        & (results["strategy"] == "class_aware")
+        & (results["max_imbalance_ratio"].astype(str) == "none")
+    ]
+    return all(int((block["n_estimators"] == n_est).sum()) >= n_splits for n_est in n_estimators)
+
+
 def run(args) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -506,12 +566,64 @@ def run(args) -> None:
         skipped = pd.read_csv(skipped_path)
     else:
         skipped = pd.DataFrame()
-    # Configs whose first measured fold already exceeded the time limit.
-    too_slow: set[tuple] = set()
+    tables: dict[str, tuple] = {}
+    pending: list[dict] = []
+    def _remember_skip(job: dict, reason: str, expected: float | None) -> None:
+        nonlocal skipped
+        if not skipped.empty:
+            already = (
+                (skipped["dataset"] == job["dataset"])
+                & (skipped["strategy"] == job["strategy"])
+                & (skipped["fold"] == job["fold"])
+                & (skipped["max_imbalance_ratio"].astype(str) == job["label"])
+                & (skipped["n_estimators"] == job["n_estimators"])
+            )
+            if bool(already.any()):
+                return
+        skip_row = {
+            **job["row_key"],
+            "n_context": int(job["n_context"]),
+            "expected_seconds": None if expected is None else float(expected),
+            "reason": reason,
+        }
+        skipped = pd.concat([skipped, pd.DataFrame([skip_row])], ignore_index=True)
+
+    def _copy_donor(job: dict) -> bool:
+        """Reuse a full-context fold. Returns True when the job is finished."""
+        nonlocal results
+        if job["n_context"] != job["n_train"] or results.empty:
+            return False
+        donor_mask = (
+            (results["dataset"] == job["dataset"])
+            & (results["strategy"] == job["strategy"])
+            & (results["fold"] == job["fold"])
+            & (results["n_estimators"] == job["n_estimators"])
+            & (results["n_splits"] == args.n_splits)
+            & (results["max_rows"] == job["row_key"]["max_rows"])
+            & (results["seed"] == args.seed)
+            & (results["n_context"] == job["n_train"])
+        )
+        donors = results.loc[donor_mask]
+        if donors.empty:
+            return False
+        row = donors.iloc[0].to_dict()
+        row["max_imbalance_ratio"] = job["label"]
+        results = pd.concat([results, pd.DataFrame([row])], ignore_index=True)
+        results.to_csv(results_path, index=False)
+        print(
+            f"  n_est={job['n_estimators']} {job['strategy']} ratio={job['label']} "
+            f"fold={job['fold']}: same context as ratio={donors.iloc[0]['max_imbalance_ratio']}",
+            flush=True,
+        )
+        return True
+
     for name in args.datasets:
         if name not in TABARENA_TASKS:
             known = ", ".join(sorted(TABARENA_TASKS))
             raise SystemExit(f"Unknown dataset {name!r}. Known tasks: {known}")
+        if _dataset_is_finished(results, name, list(args.n_estimators), args.n_splits):
+            print(f"\n=== {name}: already finished ===", flush=True)
+            continue
         print(f"\n=== {name} (OpenML {TABARENA_TASKS[name]}) ===", flush=True)
         X, y = _load_task(name)
         counts = _class_counts(y)
@@ -520,8 +632,7 @@ def run(args) -> None:
             f"counts={sorted(counts.tolist(), reverse=True)} ratio={counts.max() / counts.min():.2f}",
             flush=True,
         )
-        n_rows = len(y)
-        if args.max_rows is not None and n_rows > args.max_rows:
+        if args.max_rows is not None and len(y) > args.max_rows:
             X, y = _stratified_take(X, y, args.max_rows, args.seed)
             counts = _class_counts(y)
             print(
@@ -535,15 +646,14 @@ def run(args) -> None:
                 flush=True,
             )
             continue
-
+        tables[name] = (X, y)
         splitter = StratifiedKFold(n_splits=args.n_splits, shuffle=True, random_state=args.seed)
         splits = list(splitter.split(np.zeros(len(y)), y))
         for n_estimators in args.n_estimators:
             for ratio in ratios:
                 label = _ratio_label(ratio)
                 for fold, (train_idx, test_idx) in enumerate(splits):
-                    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-                    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+                    y_train = y.iloc[train_idx]
                     n_context = _context_size(y_train, ratio)
                     strategies = ["class_aware"]
                     if ratio is not None and n_context < len(y_train):
@@ -560,105 +670,138 @@ def run(args) -> None:
                             "seed": int(args.seed),
                         }
                         if _already_ran(results, row_key):
-                            print(
-                                f"  n_est={n_estimators} {strategy} ratio={label} fold={fold}: cached",
-                                flush=True,
-                            )
                             continue
-                        # A cap that does not drop rows is the same fit as every
-                        # other non-binding cap: same seed, full context, no
-                        # Elkan correction. Reuse the first such fold.
-                        if n_context == len(y_train) and not results.empty:
-                            donor_mask = (
-                                (results["dataset"] == name)
-                                & (results["strategy"] == strategy)
-                                & (results["fold"] == fold)
-                                & (results["n_estimators"] == n_estimators)
-                                & (results["n_splits"] == args.n_splits)
-                                & (results["max_rows"] == row_key["max_rows"])
-                                & (results["seed"] == args.seed)
-                                & (results["n_context"] == len(y_train))
-                            )
-                            donors = results.loc[donor_mask]
-                            if not donors.empty:
-                                donor = donors.iloc[0]
-                                row = donor.to_dict()
-                                row["max_imbalance_ratio"] = label
-                                results = pd.concat([results, pd.DataFrame([row])], ignore_index=True)
-                                results.to_csv(results_path, index=False)
-                                print(
-                                    f"  n_est={n_estimators} {strategy} ratio={label} fold={fold}: "
-                                    f"same context as ratio={donor['max_imbalance_ratio']}",
-                                    flush=True,
-                                )
-                                continue
-                        config_key = (name, strategy, int(n_estimators), label)
-                        expected = _expected_seconds(results, name, n_estimators, n_context)
-                        if config_key in too_slow or (expected is not None and expected > TIME_LIMIT_S):
-                            reason = (
-                                "earlier fold exceeded the time limit"
-                                if config_key in too_slow
-                                else f"expected {expected:.0f}s > {TIME_LIMIT_S:.0f}s"
-                            )
-                            already_skipped = False
-                            if not skipped.empty:
-                                already_skipped = bool(
-                                    (
-                                        (skipped["dataset"] == name)
-                                        & (skipped["strategy"] == strategy)
-                                        & (skipped["fold"] == fold)
-                                        & (skipped["max_imbalance_ratio"].astype(str) == label)
-                                        & (skipped["n_estimators"] == n_estimators)
-                                    ).any()
-                                )
-                            if not already_skipped:
-                                skip_row = {
-                                    **row_key,
-                                    "n_context": int(n_context),
-                                    "expected_seconds": None if expected is None else float(expected),
-                                    "reason": reason,
-                                }
-                                skipped = pd.concat([skipped, pd.DataFrame([skip_row])], ignore_index=True)
-                                skipped.to_csv(skipped_path, index=False)
-                            print(
-                                f"  n_est={n_estimators} {strategy} ratio={label} fold={fold}: "
-                                f"skip ({reason})",
-                                flush=True,
-                            )
-                            continue
-                        clf, proba, fit_seconds, predict_seconds, context_rows, reference_classes = _fit_one(
-                            strategy, ratio, X_train, y_train, X_test, n_estimators, args.seed
+                        pending.append(
+                            {
+                                "dataset": name,
+                                "strategy": strategy,
+                                "fold": int(fold),
+                                "label": label,
+                                "ratio": ratio,
+                                "n_estimators": int(n_estimators),
+                                "n_context": int(n_context),
+                                "n_train": int(len(y_train)),
+                                "train_idx": train_idx,
+                                "test_idx": test_idx,
+                                "row_key": row_key,
+                            }
                         )
-                        auc, loss = _scores(y_test, proba, reference_classes)
-                        natural = float(clf.imbalance_ratio_)
-                        row = {
-                            **row_key,
-                            "openml_id": TABARENA_TASKS[name],
-                            "n_classes": int(len(reference_classes)),
-                            "n_features": int(X.shape[1]),
-                            "n_rows": int(len(y)),
-                            "n_train": int(len(y_train)),
-                            "n_test": int(len(y_test)),
-                            "natural_ratio": natural,
-                            "n_context": int(context_rows),
-                            "fit_seconds": fit_seconds,
-                            "predict_seconds": predict_seconds,
-                            "fit_predict_seconds": fit_seconds + predict_seconds,
-                            "roc_auc": auc,
-                            "log_loss": loss,
-                        }
-                        results = pd.concat([results, pd.DataFrame([row])], ignore_index=True)
-                        results.to_csv(results_path, index=False)
-                        elapsed = fit_seconds + predict_seconds
-                        if elapsed > TIME_LIMIT_S:
-                            too_slow.add(config_key)
-                        print(
-                            f"  n_est={n_estimators} {strategy} ratio={label} fold={fold}: "
-                            f"context={context_rows} time={elapsed:.2f}s "
-                            f"auc={auc:.4f} logloss={loss:.4f}",
-                            flush=True,
-                        )
-            plot_cv(results, output_dir)
+
+    # Identical full-context caps share one fit. Copy those before spending time.
+    still_pending = []
+    for job in pending:
+        if _copy_donor(job):
+            continue
+        still_pending.append(job)
+    pending = still_pending
+    print(
+        f"\n{len(pending)} folds still to run, shortest prediction first, "
+        f"limit {TIME_LIMIT_S:.0f}s",
+        flush=True,
+    )
+
+    while pending:
+        for job in pending:
+            job["expected"] = _expected_seconds(
+                results, job["dataset"], job["n_estimators"], job["n_context"]
+            )
+        pending.sort(
+            key=lambda job: (
+                job["expected"] if job["expected"] is not None else 1e9,
+                job["n_context"],
+                job["n_estimators"],
+                job["dataset"],
+                job["fold"],
+            )
+        )
+        if pending[0]["expected"] is None or pending[0]["expected"] > TIME_LIMIT_S:
+            for job in pending:
+                _remember_skip(
+                    job,
+                    f"expected {job['expected']:.0f}s > {TIME_LIMIT_S:.0f}s"
+                    if job["expected"] is not None
+                    else "no timing anchor",
+                    job["expected"],
+                )
+            print(
+                f"skip remaining {len(pending)} folds; "
+                f"shortest expectation is {pending[0]['expected']:.1f}s",
+                flush=True,
+            )
+            skipped.to_csv(skipped_path, index=False)
+            pending = []
+            break
+
+        fastest = float(pending[0]["expected"])
+        # The next batch stays close to the fastest remaining fold so its
+        # measured time can revise the estimate before a longer fold starts.
+        ceiling = min(TIME_LIMIT_S, max(fastest * 1.25, fastest + 1.5))
+        batch = [job for job in pending if job["expected"] is not None and job["expected"] <= ceiling]
+        batch_ids = {id(job) for job in batch}
+        pending = [job for job in pending if id(job) not in batch_ids]
+        print(
+            f"\nbatch: {len(batch)} folds, expected {fastest:.1f}–{ceiling:.1f}s",
+            flush=True,
+        )
+        for job in batch:
+            if _copy_donor(job):
+                continue
+            expected = _expected_seconds(results, job["dataset"], job["n_estimators"], job["n_context"])
+            if expected is None or expected > TIME_LIMIT_S:
+                reason = (
+                    "no timing anchor"
+                    if expected is None
+                    else f"expected {expected:.0f}s > {TIME_LIMIT_S:.0f}s"
+                )
+                _remember_skip(job, reason, expected)
+                print(
+                    f"  {job['dataset']} n_est={job['n_estimators']} {job['strategy']} "
+                    f"ratio={job['label']} fold={job['fold']}: skip ({reason})",
+                    flush=True,
+                )
+                continue
+            X, y = tables[job["dataset"]]
+            X_train, X_test = X.iloc[job["train_idx"]], X.iloc[job["test_idx"]]
+            y_train, y_test = y.iloc[job["train_idx"]], y.iloc[job["test_idx"]]
+            clf, proba, fit_seconds, predict_seconds, context_rows, reference_classes = _fit_one(
+                job["strategy"],
+                job["ratio"],
+                X_train,
+                y_train,
+                X_test,
+                job["n_estimators"],
+                args.seed,
+            )
+            auc, loss = _scores(y_test, proba, reference_classes)
+            elapsed = fit_seconds + predict_seconds
+            row = {
+                **job["row_key"],
+                "openml_id": TABARENA_TASKS[job["dataset"]],
+                "n_classes": int(len(reference_classes)),
+                "n_features": int(X.shape[1]),
+                "n_rows": int(len(y)),
+                "n_train": int(len(y_train)),
+                "n_test": int(len(y_test)),
+                "natural_ratio": float(clf.imbalance_ratio_),
+                "n_context": int(context_rows),
+                "fit_seconds": fit_seconds,
+                "predict_seconds": predict_seconds,
+                "fit_predict_seconds": elapsed,
+                "roc_auc": auc,
+                "log_loss": loss,
+            }
+            results = pd.concat([results, pd.DataFrame([row])], ignore_index=True)
+            results.to_csv(results_path, index=False)
+            print(
+                f"  {job['dataset']} n_est={job['n_estimators']} {job['strategy']} "
+                f"ratio={job['label']} fold={job['fold']}: context={context_rows} "
+                f"time={elapsed:.2f}s expected={expected:.1f}s auc={auc:.4f} logloss={loss:.4f}",
+                flush=True,
+            )
+        if not skipped.empty:
+            skipped.to_csv(skipped_path, index=False)
+        plot_cv(results, output_dir)
+
     summary = plot_cv(results, output_dir)
     print(f"\nWrote {results_path}", flush=True)
     if not summary.empty:
