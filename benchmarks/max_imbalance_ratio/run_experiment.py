@@ -372,12 +372,173 @@ def _panel_figure(summary: pd.DataFrame, score: str, *, maximize: bool, title: s
     plt.close(fig)
 
 
+def _configuration_label(row) -> str:
+    """Short label: ensemble size, then the cap or a uniform subsample of that size."""
+    members = int(row["n_estimators"])
+    ratio = str(row["max_imbalance_ratio"])
+    natural = float(row["natural_ratio_mean"])
+    full = ratio == "none" or float(ratio) + 1e-9 >= natural
+    tag = "full" if full else ratio
+    if row["strategy"] == "uniform" and not full:
+        tag = "u" + tag
+    return f"{members}·{tag}"
+
+
+def _dedupe_configs(summary: pd.DataFrame) -> pd.DataFrame:
+    """Keep one row when several caps are the same copied full-context fit."""
+    ordered = summary.copy()
+
+    def _cap_order(value: object) -> float:
+        text = str(value)
+        if text == "none":
+            return 1e9
+        return float(text)
+
+    ordered["_order"] = ordered["max_imbalance_ratio"].map(_cap_order)
+    ordered = ordered.sort_values("_order")
+    identity = [
+        "dataset",
+        "strategy",
+        "n_estimators",
+        "time_mean",
+        "roc_auc_mean",
+        "log_loss_mean",
+        "n_context_mean",
+    ]
+    return ordered.drop_duplicates(identity, keep="first").drop(columns="_order")
+
+
+def _joint_pareto_figure(summary: pd.DataFrame, score: str, *, maximize: bool, title: str, ylabel: str, path: Path) -> pd.DataFrame:
+    """Pareto front over caps, uniform subsamples, and ensemble sizes together."""
+    configs = _dedupe_configs(summary)
+    configs = configs.copy()
+    configs["on_front"] = False
+    configs["label"] = configs.apply(_configuration_label, axis=1)
+    mean_col = f"{score}_mean"
+    for dataset, index in configs.groupby("dataset").groups.items():
+        block = configs.loc[index]
+        mask = _pareto_mask(block["time_mean"].to_numpy(), block[mean_col].to_numpy(), maximize=maximize)
+        configs.loc[block.index[mask], "on_front"] = True
+
+    datasets = [name for name in DATASET_ORDER if name in set(configs["dataset"])]
+    if not datasets:
+        return configs
+    n_cols = 3
+    n_rows = int(np.ceil(len(datasets) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.8 * n_cols, 4.0 * n_rows), squeeze=False)
+    for axis in axes.ravel():
+        axis.set_visible(False)
+    markers = {1: "o", 4: "s", 8: "D"}
+    colors = {"class_aware": "#1f4e79", "uniform": "#c45c26"}
+    for axis, dataset in zip(axes.ravel(), datasets):
+        axis.set_visible(True)
+        block = configs[configs["dataset"] == dataset]
+        for strategy, color in colors.items():
+            for n_estimators, marker in markers.items():
+                group = block[(block["strategy"] == strategy) & (block["n_estimators"] == n_estimators)]
+                if group.empty:
+                    continue
+                kind = "class-aware" if strategy == "class_aware" else "uniform subsample"
+                axis.scatter(
+                    group["time_mean"],
+                    group[mean_col],
+                    s=22,
+                    marker=marker,
+                    color=color,
+                    alpha=0.28,
+                    linewidths=0,
+                    zorder=2,
+                )
+        front = block[block["on_front"]].sort_values("time_mean")
+        if not front.empty:
+            axis.plot(front["time_mean"], front[mean_col], color="#222222", linewidth=1.0, zorder=3)
+            for _, row in front.iterrows():
+                axis.scatter(
+                    [row["time_mean"]],
+                    [row[mean_col]],
+                    s=46,
+                    marker=markers[int(row["n_estimators"])],
+                    facecolor=colors[row["strategy"]],
+                    edgecolor="#111111",
+                    linewidths=0.6,
+                    zorder=4,
+                )
+                axis.annotate(
+                    row["label"],
+                    (row["time_mean"], row[mean_col]),
+                    textcoords="offset points",
+                    xytext=(4, 3),
+                    fontsize=7,
+                )
+        ratio = float(block["natural_ratio_mean"].iloc[0])
+        short_name = dataset.replace("_and_academic_success", "").replace("_prediction", "").replace(
+            "_insurance_policies", ""
+        )
+        axis.set_title(f"{short_name}\nratio {ratio:.0f}×, n={int(block['n_rows'].iloc[0])}", fontsize=9)
+        axis.set_xlabel("fit + predict time (s)")
+        axis.set_ylabel(ylabel)
+        axis.grid(True, alpha=0.3)
+    legend_handles = []
+    for strategy, color in colors.items():
+        kind = "class-aware" if strategy == "class_aware" else "uniform subsample"
+        for n_estimators, marker in markers.items():
+            legend_handles.append(
+                plt.Line2D(
+                    [0],
+                    [0],
+                    marker=marker,
+                    color="none",
+                    markerfacecolor=color,
+                    markeredgecolor=color,
+                    markersize=6,
+                    label=f"{kind}, {n_estimators} members",
+                )
+            )
+    fig.legend(
+        handles=legend_handles,
+        loc="upper center",
+        ncol=3,
+        fontsize=8,
+        frameon=False,
+        bbox_to_anchor=(0.5, 1.02),
+    )
+    fig.suptitle(title + "\nlabels are ensemble size · cap (u = uniform subsample of that size)", fontsize=12, y=1.06)
+    fig.tight_layout()
+    fig.savefig(path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    return configs
+
+
 def plot_cv(results: pd.DataFrame, output_dir: Path) -> pd.DataFrame:
     summary = summarize(results)
     if summary.empty:
         return summary
     summary = summary.loc[summary["n_folds"] >= 5].copy()
     summary.to_csv(output_dir / "results_cv_summary.csv", index=False)
+    roc_front = _joint_pareto_figure(
+        summary,
+        "roc_auc",
+        maximize=True,
+        title="Joint Pareto front: ROC-AUC vs fit+predict time",
+        ylabel="ROC-AUC",
+        path=output_dir / "pareto_joint_roc_auc.png",
+    )
+    loss_front = _joint_pareto_figure(
+        summary,
+        "log_loss",
+        maximize=False,
+        title="Joint Pareto front: log-loss vs fit+predict time",
+        ylabel="log-loss",
+        path=output_dir / "pareto_joint_log_loss.png",
+    )
+    roc_front = roc_front.rename(columns={"on_front": "on_roc_auc_front"}).drop(columns=["label"])
+    loss_kept = loss_front[["dataset", "strategy", "n_estimators", "max_imbalance_ratio", "on_front"]]
+    joint = roc_front.merge(
+        loss_kept.rename(columns={"on_front": "on_log_loss_front"}),
+        on=["dataset", "strategy", "n_estimators", "max_imbalance_ratio"],
+        how="left",
+    )
+    joint.to_csv(output_dir / "pareto_joint.csv", index=False)
     for n_estimators in sorted(summary["n_estimators"].unique()):
         subset = summary[summary["n_estimators"] == n_estimators]
         _strategy_figure(

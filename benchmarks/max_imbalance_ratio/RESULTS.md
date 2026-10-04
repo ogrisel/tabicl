@@ -133,17 +133,59 @@ predicted above a minute and were not run. The minority class is larger
 on the full table than on a 12,000-row slice, so the same ratio keeps
 more rows and the fit costs more.
 
-## Recommendation
+## Joint Pareto front
 
-The estimator default stays **`None`** for both `max_imbalance_ratio`
-and `subsample`. Undersampling is opt-in.
+Each panel below puts every measured combination on one axes:
+`max_imbalance_ratio`, a uniform `subsample` of that same size, and
+`n_estimators` in `{1, 4, 8}`. Faint points are off the front. The line
+connects the Pareto front of the fold means. A label `1·5` is one member
+and cap 5. `1·u1` is one member and a uniform subsample the size of cap 1.
+`1·full` is a cap that does not drop rows. Caps that copy the same
+full-context fit are drawn once. Membership is in `pareto_joint.csv`.
 
-When turning the ratio on, **20** is the cap that preserves ROC-AUC and
-log-loss for an ensemble of 4 members on every task where the uncapped
-fit was measured. It is exactly a no-op when the natural ratio is already
-below 20. Caps of 5 and below are faster, and MIC is the task that moves
-past the fold noise.
+![Joint ROC-AUC front](pareto_joint_roc_auc.png)
 
-Pass the row budget as `subsample` only when a uniform draw is intended.
-For an imbalanced training set, set `max_imbalance_ratio` so the same
-budget is drawn classwise and the Elkan correction runs after the ensemble.
+![Joint log-loss front](pareto_joint_log_loss.png)
+
+The ROC-AUC front is the class-aware curve at **one member**, from a
+small cap up to the fullest context that was measured. Four and eight
+members show up only at the slow end, and only on some tasks:
+
+- Anneal and taiwanese bankruptcy: no ensemble point is on the ROC-AUC front.
+- MIC: eight members at cap 20 add 0.0014 AUC over the one-member full context (2.4 s → 8.7 s).
+- Coil2000: four members at cap 10 add 0.006 AUC over one member at cap 10 (7.5 s → 36 s).
+- Polish bankruptcy: four members on the full context add 0.0047 AUC (5.3 s → 21 s).
+- Students dropout: eight members add 0.0005 AUC over one member on the full context (2.7 s → 21 s).
+
+Uniform points sit under that curve. A matched uniform draw is faster
+than class-aware by less than the fold-to-fold time noise on 93% of
+pairs. It reaches the front only as the cheapest point, where that
+tiny time edge comes with a real AUC drop (kddcup09 cap 1: 0.761 vs
+0.826; coil2000 cap 1: 0.707 vs 0.753).
+
+Log-loss has the same shape. Multiclass tasks keep improving as the
+context grows: anneal log-loss falls from 0.053 at cap 5 to 0.016 on
+the full context, still with one member. MIC's lowest loss is eight
+members at cap 20 (0.433 vs 0.438 for one member on the full context).
+
+## Rules of thumb
+
+1. Leave `subsample` unset. To drop rows, set `max_imbalance_ratio`.
+   A uniform subsample of the same length is not a faster route to the
+   same ROC-AUC.
+
+2. Stay at `n_estimators=1` until the context is as large as you are
+   willing to pay for. Adding members is the expensive end of the front:
+   about 0.005 AUC on coil2000 and polish, and under 0.002 AUC on the
+   other tasks where 4 and 8 members were measured, for 3–5× the time.
+
+3. Pick the cap on that one-member class-aware curve.
+   - Natural ratio under about 5 (students dropout): leave the ratio unset. Cap 1 costs 0.004 AUC and 0.012 log-loss.
+   - Binary ROC-AUC: cap **5** is within 0.0025 of the best measured one-member AUC on APSFailure, kddcup09, coil2000, polish, and seismic-bumps. Taiwanese bankruptcy (30×) still wants cap **20** (0.0018 below the full context; cap 5 is 0.0054 below).
+   - Multiclass, or log-loss on a large ratio: cap **20**, or `None` if the fit is cheap. Cap 5 loses 0.027 AUC on MIC and 0.037 log-loss on anneal. Cap 20 brings those AUC gaps down to 0.0048 and 0.0009.
+
+The library defaults stay `None`. If you are already using 4 members,
+cap 20 is the opt-in that stayed inside the fold noise of the uncapped
+run on every task where both were measured. It does not replace rule 2:
+one member at cap 20 is the faster way to that same accuracy when you
+are free to change `n_estimators`.
