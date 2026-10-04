@@ -4,6 +4,27 @@
 New features
 ------------
 
+- ``TabICLClassifier`` accepts ``max_imbalance_ratio`` (default ``None``) and
+  ``subsample`` (default ``None``). A finite ratio undersamples majority classes
+  in the in-context training set whenever the majority-to-minority count ratio
+  exceeds it, then applies a multiclass Elkan correction so ``predict_proba``
+  stays calibrated to the class prior of the original ``y``. ``subsample`` is
+  the fixed row budget of ``BaggingClassifier(max_samples=...)``: ``None`` does
+  not impose one, an int is a row count, and a float in ``(0, 1]`` is a fraction
+  of the training rows. Draws are without replacement. With a ratio set, the
+  budget is drawn classwise and every member shares class counts. Without a
+  ratio, the budget is drawn uniformly and the Elkan correction is not applied.
+  The default of both parameters disables subsampling. Kept rows are stored
+  in their original order for a stable index set; attention over rows is
+  permutation-equivariant when each row stays tied to its label. The correction
+  is the prior-shift map of Saerens et al. (2002) and reduces to Theorem 2 of
+  Elkan (IJCAI 2001) for two classes. On the TabArena tasks where both
+  were measured at ``n_estimators=4``, cap 20 kept 5-fold ROC-AUC and
+  log-loss within one standard deviation of the uncapped run. Each
+  ensemble member draws its own majority subsample. The Elkan correction is
+  applied once, after members are averaged and, when averaging logits, after
+  the softmax.
+
 - Add TabICLv2 pre-training code (`python -m tabicl.train`): quantile regression training via a
   pinball loss (`--regression_method quantile`) in addition to classification, and the Muon
   optimizer (`--muon True`) alongside AdamW. The training CLI now also exposes the `graph_scm`

@@ -277,6 +277,10 @@ class TabICLBaseEstimator(BaseEstimator):
             eg.y_ = None
             for prep in eg.preprocessors_.values():
                 prep.X_transformed_ = None
+            member_preprocessors = getattr(eg, "member_preprocessors_", None) or {}
+            for pipes in member_preprocessors.values():
+                for prep in pipes:
+                    prep.X_transformed_ = None
             state["ensemble_generator_"] = eg
 
         # Version metadata
