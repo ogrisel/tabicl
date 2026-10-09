@@ -2,22 +2,16 @@
 
 ## Release process
 
-TabICL is published to [PyPI](https://pypi.org/project/tabicl/) and
-[TestPyPI](https://test.pypi.org/project/tabicl/) by
+TabICL is published to [PyPI](https://pypi.org/project/tabicl/) by
 [`.github/workflows/publish-to-pypi.yml`](.github/workflows/publish-to-pypi.yml).
 Publishing uses [PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/):
 GitHub Actions mints a short-lived OpenID Connect token, and PyPI exchanges it
-for upload credentials. The job layout matches joblib/loky and
-joblib/threadpoolctl.
+for upload credentials. The PyPI and GitHub Release jobs follow joblib/loky
+and joblib/threadpoolctl.
 
 The package version is `__version__` in `src/tabicl/__about__.py`. Hatch reads
 that file. Between releases the version is the next release number plus a
 `.dev0` suffix, currently `2.3.0.dev0`.
-
-Pushes to this repository build an sdist and a wheel and upload them to
-TestPyPI. Forks do not run the workflow. TestPyPI uploads set `skip-existing`,
-so a later push of the same `2.3.0.dev0` files does not fail when that version
-is already present.
 
 ### Making a release
 
@@ -37,8 +31,7 @@ is already present.
 5. Approve the `pypi` environment when GitHub requests it.
 6. The workflow then builds the sdist and wheel, uploads them to PyPI, signs
    them with Sigstore, creates the GitHub Release for that tag, and uploads
-   the distributions and signatures. The same files are also uploaded to
-   TestPyPI.
+   the distributions and signatures.
 7. On `main`, set `__version__` to the following release with a `.dev0`
    suffix, for example `2.4.0.dev0` or `2.3.1.dev0`, and commit that change.
 
