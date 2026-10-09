@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Write GitHub release notes from the matching section of CHANGES.md.
 
-The script always exits successfully. A missing file, an unreadable file, or a
-changelog with no section for the package version produces a short fallback
-note instead of stopping the release.
+The script always exits successfully. It uses the changelog section for the
+package version, shortened to GitHub's limit. When that section is missing or
+the version cannot be read, it uses the full changelog without shortening it.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def truncate(notes: str, limit: int = GITHUB_RELEASE_BODY_LIMIT) -> str:
 
 
 def fallback(version: str | None, reason: str) -> str:
-    """Return a short note used when the changelog section cannot be used."""
+    """Return a short note used only when the changelog file itself is unusable."""
     label = f"TabICL {version}" if version else "TabICL"
     return (
         f"{label}\n\n"
@@ -79,13 +79,26 @@ def fallback(version: str | None, reason: str) -> str:
 
 
 def build_notes(changes: str, version: str | None) -> str:
-    """Build release notes for ``version`` from changelog text."""
-    if not version:
-        return fallback(None, "package version could not be read")
-    section = extract_section(changes, version)
-    if section is None:
-        return fallback(version, f"no section for {version}")
-    return truncate(section)
+    """Build release notes for ``version`` from changelog text.
+
+    A usable section is shortened to GitHub's body limit. Otherwise the full
+    changelog is returned without shortening.
+    """
+    if version:
+        section = extract_section(changes, version)
+        if section is not None:
+            return truncate(section)
+        print(
+            f"warning: CHANGES.md has no section for {version}; "
+            "using the full changelog",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "warning: package version could not be read; using the full changelog",
+            file=sys.stderr,
+        )
+    return changes
 
 
 def write_notes(changes_path: Path, about_path: Path, output_path: Path) -> str:
@@ -141,7 +154,10 @@ def main(argv: list[str] | None = None) -> int:
         write_notes(args.changes, args.about, args.output)
     except Exception as exc:  # noqa: BLE001 - release notes must not stop a release
         print(f"warning: release notes failed: {exc}", file=sys.stderr)
-        fallback_notes = fallback(None, "release notes could not be prepared")
+        try:
+            fallback_notes = args.changes.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            fallback_notes = fallback(None, "release notes could not be prepared")
         try:
             args.output.write_text(fallback_notes, encoding="utf-8")
         except OSError:

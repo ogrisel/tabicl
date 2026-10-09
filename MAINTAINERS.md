@@ -18,8 +18,8 @@ that file. Between releases the version is the next release number plus a
 1. Add a `CHANGES.md` section whose heading is the release version on its own
    line, followed by a line of `=` characters. The workflow copies that
    section into the GitHub Release and shortens it if it exceeds GitHub's
-   limit. A missing or unreadable section does not stop the release; the
-   release is created with a short note instead.
+   limit. A missing section does not stop the release; the release notes are
+   then the full `CHANGES.md` file, without shortening.
 2. Set `__version__` in `src/tabicl/__about__.py` to that same version, for
    example `2.3.0`.
 3. Commit those changes on `main`.
