@@ -30,6 +30,44 @@ jobs:
       with:
         python-version: "3.x"
 
+    - name: Check the tag, version, and changelog
+      run: |
+        python - <<'PY'
+        import os
+        import pathlib
+        import re
+
+        about = pathlib.Path("src/tabicl/__about__.py").read_text()
+        match = re.search(r"""__version__\s*=\s*['"]([^'"]+)['"]""", about)
+        if match is None:
+            raise SystemExit("Could not read __version__ from src/tabicl/__about__.py")
+        version = match.group(1)
+        tag = os.environ["GITHUB_REF_NAME"]
+        print(f"package version: {version}")
+        print(f"git tag: {tag}")
+        if tag != f"v{version}":
+            raise SystemExit(
+                f"Package version {version} does not match tag {tag} "
+                f"(expected v{version})."
+            )
+
+        lines = pathlib.Path("CHANGES.md").read_text().splitlines()
+        start = None
+        for i, line in enumerate(lines[:-1]):
+            if line.strip() == version and re.fullmatch(r"=+", lines[i + 1].strip()):
+                start = i
+                break
+        if start is None:
+            raise SystemExit(f"CHANGES.md has no section for {version}")
+        end = len(lines)
+        for j in range(start + 2, len(lines) - 1):
+            if lines[j].strip() and re.fullmatch(r"=+", lines[j + 1].strip()):
+                end = j
+                break
+        notes = "\n".join(lines[start:end]).strip() + "\n"
+        pathlib.Path("release-notes.md").write_text(notes)
+        PY
+
     - name: Install pypa/build
       run: python -m pip install build --user
 
@@ -41,7 +79,15 @@ jobs:
       with:
         name: python-package-distributions
         path: dist/
-        retention-days: 1
+        # Keep the built distributions long enough for a later security audit.
+        retention-days: 90
+
+    - name: Store the release notes
+      uses: actions/upload-artifact@v7
+      with:
+        name: release-notes
+        path: release-notes.md
+        retention-days: 90
 
   publish-to-pypi:
     name: >-
@@ -82,8 +128,13 @@ jobs:
       with:
         name: python-package-distributions
         path: dist/
+    - name: Download the release notes
+      uses: actions/download-artifact@v8
+      with:
+        name: release-notes
+        path: .
     - name: Sign the dists with Sigstore
-      uses: sigstore/gh-action-sigstore-python@v3.5.0
+      uses: sigstore/gh-action-sigstore-python@790bc6befb9d733738f18d8f895854b453640ec9 # v3.5.0
       with:
         inputs: >-
           ./dist/*.tar.gz
@@ -91,18 +142,28 @@ jobs:
     - name: Create GitHub Release
       env:
         GITHUB_TOKEN: ${{ github.token }}
-      run: >-
-        gh release create
-        "$GITHUB_REF_NAME"
-        --repo "$GITHUB_REPOSITORY"
-        --notes ""
+      run: |
+        if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          echo "GitHub Release $GITHUB_REF_NAME already exists"
+        else
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --notes-file release-notes.md
+        fi
     - name: Upload artifact signatures to GitHub Release
       env:
         GITHUB_TOKEN: ${{ github.token }}
-      # Upload to GitHub Release using the `gh` CLI.
-      # `dist/` contains the built packages, and the
-      # sigstore-produced signatures and certificates.
-      run: >-
-        gh release upload
-        "$GITHUB_REF_NAME" dist/**
-        --repo "$GITHUB_REPOSITORY"
+      # dist/ contains the built packages and the sigstore signatures.
+      # Assets already on the release are left in place so a rerun can
+      # upload anything that was missed.
+      run: |
+        existing="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+        shopt -s nullglob
+        for file in dist/*; do
+          name="$(basename "$file")"
+          if printf '%s\n' "$existing" | grep -Fxq "$name"; then
+            echo "Asset $name is already on the release"
+            continue
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$file" --repo "$GITHUB_REPOSITORY"
+        done
