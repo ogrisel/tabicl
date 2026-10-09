@@ -19,31 +19,6 @@ TestPyPI. Forks do not run the workflow. TestPyPI uploads set `skip-existing`,
 so a later push of the same `2.3.0.dev0` files does not fail when that version
 is already present.
 
-### One-time setup
-
-Register a trusted publisher for workflow `publish-to-pypi.yml` on both
-indexes. The environment name in the publisher must match the GitHub
-environment below.
-
-On PyPI, at `https://pypi.org/manage/project/tabicl/settings/publishing/`:
-
-- Owner: `soda-inria`
-- Repository: `tabicl`
-- Workflow: `publish-to-pypi.yml`
-- Environment: `pypi`
-
-On TestPyPI, at `https://test.pypi.org/manage/project/tabicl/settings/publishing/`:
-
-- Owner: `soda-inria`
-- Repository: `tabicl`
-- Workflow: `publish-to-pypi.yml`
-- Environment: `testpypi`
-
-In the GitHub repository settings, create environments named `pypi` and
-`testpypi`. Require approval from a maintainer on the `pypi` environment.
-PyPI's guide asks for that approval on the environment that publishes to the
-real index.
-
 ### Making a release
 
 1. Update `CHANGES.md` for the release.
