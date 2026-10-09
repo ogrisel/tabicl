@@ -26,6 +26,11 @@ Bug fixes
 
 - Improve Apple Silicon MPS inference: MPS now uses the same AMP, auto-batching, and memory-aware inference path as other accelerators instead of falling back to the CPU path. `use_amp="auto"` is device-aware (off on CPU; size heuristic on CUDA/XPU/MPS), and float16 KV caches are kept on MPS when AMP is enabled. MPS is included in the default device order (CUDA → XPU → MPS → CPU). ([PR#144](https://github.com/soda-inria/tabicl/pull/144))
 
+Maintenance
+-----------
+
+- Publish tagged releases to PyPI from GitHub Actions with Trusted Publishing, using a short-lived OpenID Connect token.
+
 
 2.1.0
 =====
