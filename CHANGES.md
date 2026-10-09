@@ -87,11 +87,6 @@ New features
 
 - Add fine-tuning support for TabICL via `FinetunedTabICLClassifier` and `FinetunedTabICLRegressor`: full PyTorch training loop with AdamW, cosine-warmup schedule, early stopping, gradient clipping, AMP, DDP, partial module freezing, and checkpointing in the pre-training schema. ([PR#101](https://github.com/soda-inria/tabicl/pull/101), @JingangQu)
 
-Maintenance
------------
-
-- Publish to PyPI and TestPyPI from GitHub Actions with Trusted Publishing, following the joblib/loky and joblib/threadpoolctl workflow. Tag pushes upload to PyPI, sign the distributions with Sigstore, and attach them to a GitHub Release. Other pushes upload to TestPyPI.
-
 
 2.1.0
 =====
