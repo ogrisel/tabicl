@@ -30,7 +30,7 @@ jobs:
       with:
         python-version: "3.x"
 
-    - name: Check the tag, version, and changelog
+    - name: Check that the tag matches the package version
       run: |
         python - <<'PY'
         import os
@@ -50,23 +50,10 @@ jobs:
                 f"Package version {version} does not match tag {tag} "
                 f"(expected v{version})."
             )
-
-        lines = pathlib.Path("CHANGES.md").read_text().splitlines()
-        start = None
-        for i, line in enumerate(lines[:-1]):
-            if line.strip() == version and re.fullmatch(r"=+", lines[i + 1].strip()):
-                start = i
-                break
-        if start is None:
-            raise SystemExit(f"CHANGES.md has no section for {version}")
-        end = len(lines)
-        for j in range(start + 2, len(lines) - 1):
-            if lines[j].strip() and re.fullmatch(r"=+", lines[j + 1].strip()):
-                end = j
-                break
-        notes = "\n".join(lines[start:end]).strip() + "\n"
-        pathlib.Path("release-notes.md").write_text(notes)
         PY
+
+    - name: Write GitHub release notes
+      run: python scripts/release_notes.py --output release-notes.md
 
     - name: Install pypa/build
       run: python -m pip install build --user
@@ -87,6 +74,7 @@ jobs:
       with:
         name: release-notes
         path: release-notes.md
+        if-no-files-found: warn
         retention-days: 90
 
   publish-to-pypi:
@@ -130,6 +118,7 @@ jobs:
         path: dist/
     - name: Download the release notes
       uses: actions/download-artifact@v8
+      continue-on-error: true
       with:
         name: release-notes
         path: .
@@ -145,10 +134,15 @@ jobs:
       run: |
         if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
           echo "GitHub Release $GITHUB_REF_NAME already exists"
+        elif [ -s release-notes.md ] && gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --notes-file release-notes.md; then
+          echo "Created GitHub Release $GITHUB_REF_NAME"
         else
+          echo "Release notes could not be used; creating the release with a short summary"
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
-            --notes-file release-notes.md
+            --notes "TabICL ${GITHUB_REF_NAME}"
         fi
     - name: Upload artifact signatures to GitHub Release
       env:

@@ -17,15 +17,16 @@ that file. Between releases the version is the next release number plus a
 
 1. Add a `CHANGES.md` section whose heading is the release version on its own
    line, followed by a line of `=` characters. The workflow copies that
-   section into the GitHub Release.
+   section into the GitHub Release and shortens it if it exceeds GitHub's
+   limit. A missing or unreadable section does not stop the release; the
+   release is created with a short note instead.
 2. Set `__version__` in `src/tabicl/__about__.py` to that same version, for
    example `2.3.0`.
 3. Commit those changes on `main`.
 4. Tag that commit and push the tag. The tag must be `v` plus the version in
    `src/tabicl/__about__.py`, as with `v2.2.0`. The workflow stops before
-   uploading when the tag and the version differ, or when `CHANGES.md` has no
-   section for that version. Pushing the tag starts the publish workflow,
-   which also creates the GitHub Release.
+   uploading when the tag and the version differ. Pushing the tag starts the
+   publish workflow, which also creates the GitHub Release.
 
    ```bash
    git tag v2.3.0
