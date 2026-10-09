@@ -10,6 +10,7 @@ from sklearn.model_selection import train_test_split
 
 from tabicl import TabICLClassifier, TabICLRegressor
 from tabicl._model.inference import InferenceManager
+from tabicl._sklearn.preprocessing import UniqueFeatureFilter
 from tabicl._torch_devices import (
     MPS_NUMERICS_ISSUE_URL,
     resolve_default_device,
@@ -37,6 +38,8 @@ def _patch_backend_availability(
     monkeypatch.setattr(torch, "xpu", _FakeXPUBackend, raising=False)
     monkeypatch.setattr(torch, "mps", _FakeMPSBackend, raising=False)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda_available)
+
+from conftest import model_path
 
 
 @pytest.mark.parametrize(
@@ -124,6 +127,28 @@ def test_tabicl_supports_bool_object_and_string_inputs(estimator, X, device):
     est.fit(X, y)
     y_pred = est.predict(X)
 
+    assert y_pred.shape == y.shape
+
+@pytest.mark.parametrize(
+    "estimator",
+    [
+        TabICLClassifier(random_state=0, **model_path("classifier")),
+        TabICLRegressor(random_state=0, **model_path("regressor")),
+    ],
+)
+def test_tabicl_supports_float16(estimator):
+    """float16 arrays should not crash the Yeo-Johnson normalizer (issue #140)."""
+    rng = np.random.default_rng(42)
+    X = rng.standard_normal((50, 4)).astype(np.float16)
+
+    est = clone(estimator)
+    if is_classifier(est):
+        y = rng.integers(0, 2, size=50)
+    else:
+        y = rng.standard_normal(50)
+
+    est.fit(X, y)
+    y_pred = est.predict(X)
     assert y_pred.shape == y.shape
 
 
@@ -383,3 +408,18 @@ def test_tabicl_classifier_device_cpu_logloss_parity(device, kv_cache, use_amp):
 
     assert abs(scores["cpu"] - scores[device]) < score_tol
     np.testing.assert_allclose(probas["cpu"], probas[device], rtol=rtol, atol=atol)
+
+
+def test_tabicl_fits_all_constant_features():
+    """No feature is informative: one column is kept, so fit falls back to the marginal."""
+
+    X = np.tile(np.array([0.4, 1.0, 0.5, 118.2]), (6, 1))
+    y = np.array([-3.2, -1.0, 0.5, 2.0, -0.7, 1.1])
+
+    # Constant features are still dropped as long as one informative feature remains.
+    assert UniqueFeatureFilter().fit_transform(np.c_[np.ones(6), y]).shape == (6, 1)
+
+    y_pred = TabICLRegressor(n_estimators=4, random_state=0).fit(X, y).predict(X)
+
+    assert np.allclose(y_pred, y_pred[0])
+    assert abs(y_pred[0] - y.mean()) < y.std()

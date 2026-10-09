@@ -1,7 +1,7 @@
 [project]
 name = "tabicl"
 dynamic = ["version"]
-description = "TabICL: A state-of-the-art tabular foundation model"
+description = "TabICL: An open tabular foundation model"
 readme = "README.md"
 authors = [
     { name = "Jingang Qu" },
@@ -34,6 +34,7 @@ dependencies = [
     "psutil",  # used for memory calculation at inference
     "tqdm>=4.64.0",
     "huggingface-hub",
+    "tokenizers>=0.20" # only to prevent uv solver bugged backtracking
 ]
 
 [project.optional-dependencies]
@@ -50,7 +51,7 @@ doc = [
   "shapiq>=1.0",
   "numba",  # Add it here to facilitate the life of the installer
 ]
-forecast = [                                                                                                                                                                                                        
+forecast = [
     "pandas>=2.1.2",
     "statsmodels>=0.14.5",  # seasonal detection
     "matplotlib>=3.10.3",  # plotting
@@ -98,7 +99,7 @@ features = []
 [tool.hatch.envs.hatch-test]
 default-args = ["tests"]
 installer = "uv"
-features = ["test"]
+features = ["test", "forecast", "shap", "finetune"]
 
 [tool.hatch.envs.types]
 extra-dependencies = [
