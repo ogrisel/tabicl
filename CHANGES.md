@@ -29,7 +29,7 @@ Bug fixes
 Maintenance
 -----------
 
-- Publish tagged releases to PyPI from GitHub Actions with Trusted Publishing, using a short-lived OpenID Connect token.
+- Publish to PyPI and TestPyPI from GitHub Actions with Trusted Publishing, following the joblib/loky and joblib/threadpoolctl workflow. Tag pushes upload to PyPI, sign the distributions with Sigstore, and attach them to a GitHub Release. Other pushes upload to TestPyPI.
 
 
 2.1.0
